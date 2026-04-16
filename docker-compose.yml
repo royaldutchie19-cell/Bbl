@@ -1,0 +1,29 @@
+services:
+  bbl:
+    build: .
+    image: bbl:latest
+    container_name: bbl
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      # "live" pulls from Polymarket; "demo" seeds synthetic data.
+      BBL_MODE: "${BBL_MODE:-live}"
+      BBL_COLLECTORS: "markets,events,trades,leaderboard,prices,price_history,resolutions"
+      BBL_RUN_COLLECTORS: "1"
+      BBL_BACKFILL_TOP: "0"
+      BBL_BACKFILL_LIMIT: "100"
+      BBL_BACKFILL_DAYS: "30"
+      # Optional: set a real Polygon RPC for on-chain funding enrichment
+      BBL_POLYGON_RPC: "${BBL_POLYGON_RPC:-}"
+    volumes:
+      - bbl-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  bbl-data:
