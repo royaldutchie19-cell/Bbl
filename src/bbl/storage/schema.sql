@@ -184,6 +184,36 @@ CREATE TABLE IF NOT EXISTS watchlist (
     notes        TEXT
 );
 
+-- ----------------------------------------------------------------- on-chain
+
+-- Inbound USDC transfers to Polymarket proxy wallets. Used to recover the
+-- funding source (the EOA that sent USDC into the proxy). When two proxies
+-- share a funder, that's a strong wallet-linking signal.
+CREATE TABLE IF NOT EXISTS funding_transfers (
+    proxy_wallet  TEXT NOT NULL,         -- the Polymarket proxy receiving USDC
+    funder        TEXT NOT NULL,         -- the EOA sending USDC
+    block_number  INTEGER NOT NULL,
+    tx_hash       TEXT NOT NULL,
+    log_index     INTEGER NOT NULL,
+    amount_usdc   REAL,
+    ts            INTEGER,
+    PRIMARY KEY (tx_hash, log_index)
+);
+CREATE INDEX IF NOT EXISTS idx_funding_proxy  ON funding_transfers(proxy_wallet, ts);
+CREATE INDEX IF NOT EXISTS idx_funding_funder ON funding_transfers(funder, ts);
+
+-- Once we have transfers, this is the derived view: per proxy_wallet, the
+-- distinct set of funders. Stored so the analyzer doesn't need to recompute.
+CREATE TABLE IF NOT EXISTS wallet_funders (
+    proxy_wallet  TEXT NOT NULL,
+    funder        TEXT NOT NULL,
+    first_ts      INTEGER,
+    last_ts       INTEGER,
+    transfer_cnt  INTEGER,
+    total_usdc    REAL,
+    PRIMARY KEY (proxy_wallet, funder)
+);
+
 -- Append-only log of collector runs — useful for debugging + backfill gaps.
 CREATE TABLE IF NOT EXISTS collector_runs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,

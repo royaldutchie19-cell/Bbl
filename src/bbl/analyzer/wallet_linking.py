@@ -79,8 +79,8 @@ def find_wallet_links(cfg: Config, db: Database) -> int:
         key = (row["token_id"], (row["side"] or "").upper())
         idx[key].append((row["ts"], row["taker"]))
         _update_fingerprint(fingerprints, row)
-        first_seen.setdefault(row["taker"], row["ts"])
-        if row["ts"] < first_seen[row["taker"]]:
+        prev = first_seen.get(row["taker"])
+        if prev is None or row["ts"] < prev:
             first_seen[row["taker"]] = row["ts"]
 
     for key, entries in idx.items():

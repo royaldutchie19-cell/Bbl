@@ -23,7 +23,14 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
-from bbl.analyzer import compute_trader_metrics, detect_patterns, find_wallet_links
+from bbl.analyzer import (
+    build_funding_links,
+    compute_trader_metrics,
+    detect_patterns,
+    fetch_funding_for_top_wallets,
+    find_wallet_links,
+)
+from bbl.backfill import backfill_top_traders, backfill_wallet
 from bbl.collectors import ALL_COLLECTORS
 from bbl.config import Config
 from bbl.orchestrator import build_collectors, run_collectors_forever
@@ -39,11 +46,17 @@ markets_app = typer.Typer(help="Markets commands")
 analyze_app = typer.Typer(help="Analyzer")
 leaderboard_app = typer.Typer(help="Leaderboard")
 watchlist_app = typer.Typer(help="Watchlist (wallets to copy/track)")
+backfill_app = typer.Typer(help="Historical backfill")
+onchain_app = typer.Typer(help="On-chain (Polygon) enrichment")
+report_app = typer.Typer(help="Reports")
 app.add_typer(collect_app, name="collect")
 app.add_typer(markets_app, name="markets")
 app.add_typer(analyze_app, name="analyze")
 app.add_typer(leaderboard_app, name="leaderboard")
 app.add_typer(watchlist_app, name="watchlist")
+app.add_typer(backfill_app, name="backfill")
+app.add_typer(onchain_app, name="onchain")
+app.add_typer(report_app, name="report")
 
 console = Console()
 
@@ -189,14 +202,234 @@ def analyze_links(config: str = typer.Option(None)) -> None:
 
 
 @analyze_app.command("all")
-def analyze_all(config: str = typer.Option(None)) -> None:
+def analyze_all(
+    include_funding: bool = typer.Option(False, help="Also fold funding-graph links into wallet_links"),
+    config: str = typer.Option(None),
+) -> None:
     cfg, db = _setup(config)
     a = compute_trader_metrics(cfg, db)
     b = detect_patterns(cfg, db)
     c = find_wallet_links(cfg, db)
+    d = build_funding_links(cfg, db) if include_funding else 0
     console.print(
-        f"[green]done[/green] — metrics:{a} patterns:{b} links:{c}"
+        f"[green]done[/green] — metrics:{a} patterns:{b} links:{c} funding:{d}"
     )
+    db.close()
+
+
+# ----------------------------------------------------------------- backfill
+
+
+@backfill_app.command("wallet")
+def backfill_one(
+    address: str,
+    pages: int = typer.Option(200, help="Max pages to walk back"),
+    since_days: int = typer.Option(0, help="Stop after N days back (0=no cutoff)"),
+    config: str = typer.Option(None),
+) -> None:
+    """Pull historical activity for a single wallet."""
+    cfg, db = _setup(config)
+    since = int(time.time() - since_days * 86400) if since_days else None
+    n = asyncio.run(
+        backfill_wallet(cfg, db, address, max_pages=pages, since_ts=since)
+    )
+    console.print(f"[green]{n}[/green] trades inserted for {address}")
+    db.close()
+
+
+@backfill_app.command("top")
+def backfill_top(
+    limit: int = typer.Option(100, help="How many top wallets to backfill"),
+    metric: str = typer.Option("profit"),
+    window: str = typer.Option("all"),
+    since_days: int = typer.Option(90),
+    config: str = typer.Option(None),
+) -> None:
+    """Backfill activity for the top-N wallets on a leaderboard."""
+    cfg, db = _setup(config)
+    n = asyncio.run(
+        backfill_top_traders(
+            cfg, db, limit=limit, metric=metric, window=window, since_days=since_days
+        )
+    )
+    console.print(f"[green]{n}[/green] trades backfilled across top {limit}")
+    db.close()
+
+
+# ----------------------------------------------------------------- onchain
+
+
+@onchain_app.command("funding")
+def onchain_funding(
+    limit: int = typer.Option(100, help="How many top wallets to enrich"),
+    config: str = typer.Option(None),
+) -> None:
+    """Pull USDC inbound transfers for top wallets via Polygon RPC."""
+    cfg, db = _setup(config)
+    n = asyncio.run(fetch_funding_for_top_wallets(cfg, db, limit=limit))
+    console.print(f"[green]{n}[/green] funding transfers inserted")
+    m = build_funding_links(cfg, db)
+    console.print(f"[green]{m}[/green] funding links written")
+    db.close()
+
+
+@onchain_app.command("funders")
+def onchain_funders(
+    address: str,
+    config: str = typer.Option(None),
+) -> None:
+    """Show known funders for a proxy wallet."""
+    cfg, db = _setup(config)
+    rows = db.conn.execute(
+        """
+        SELECT funder, transfer_cnt, total_usdc, first_ts, last_ts
+          FROM wallet_funders WHERE proxy_wallet = ?
+         ORDER BY total_usdc DESC LIMIT 50
+        """,
+        (address.lower(),),
+    ).fetchall()
+    table = Table(title=f"Funders of {address}")
+    for col in ("funder", "transfers", "total USDC", "first", "last"):
+        table.add_column(col)
+    for r in rows:
+        table.add_row(
+            r["funder"],
+            str(r["transfer_cnt"]),
+            f"{r['total_usdc']:,.2f}",
+            time.strftime("%Y-%m-%d", time.gmtime(r["first_ts"])) if r["first_ts"] else "",
+            time.strftime("%Y-%m-%d", time.gmtime(r["last_ts"])) if r["last_ts"] else "",
+        )
+    console.print(table)
+    db.close()
+
+
+# ------------------------------------------------------------------ report
+
+
+@report_app.command("traders")
+def report_traders(
+    limit: int = typer.Option(20),
+    sort_by: str = typer.Option("realized_pnl", help="realized_pnl|roi|sharpe_like|win_rate"),
+    config: str = typer.Option(None),
+) -> None:
+    """Top traders with key metrics in one view."""
+    cfg, db = _setup(config)
+    valid = {"realized_pnl", "roi", "sharpe_like", "win_rate", "volume_usdc"}
+    if sort_by not in valid:
+        raise typer.BadParameter(f"sort_by must be one of {valid}")
+    rows = db.conn.execute(
+        f"""
+        SELECT tm.*, t.username
+          FROM trader_metrics tm
+          LEFT JOIN traders t ON t.address = tm.address
+         ORDER BY {sort_by} DESC
+         LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    table = Table(title=f"Top {limit} traders by {sort_by}")
+    for col in ("addr", "name", "trades", "vol", "pnl", "roi", "win%", "sharpe", "mkts", "early"):
+        table.add_column(col)
+    for r in rows:
+        table.add_row(
+            r["address"][:10] + "…",
+            (r["username"] or "")[:14],
+            str(r["trade_count"]),
+            f"{r['volume_usdc']:,.0f}",
+            f"{r['realized_pnl']:+,.0f}",
+            f"{(r['roi'] or 0) * 100:+.1f}%",
+            f"{(r['win_rate'] or 0) * 100:.0f}%",
+            f"{r['sharpe_like'] or 0:.2f}",
+            str(r["markets_traded"]),
+            f"{r['early_entry_score'] or 0:.2f}",
+        )
+    console.print(table)
+    db.close()
+
+
+@report_app.command("links")
+def report_links(
+    limit: int = typer.Option(30),
+    min_score: float = typer.Option(0.3),
+    reason: str = typer.Option(None, help="Filter on reason substring (timing|fingerprint|funding|new_wallet)"),
+    config: str = typer.Option(None),
+) -> None:
+    """Suspected wallet pairs — most likely same person/operator."""
+    cfg, db = _setup(config)
+    q = """
+        SELECT wl.address_a, wl.address_b, wl.score, wl.reason,
+               ta.username AS name_a, tb.username AS name_b,
+               tma.realized_pnl AS pnl_a, tmb.realized_pnl AS pnl_b
+          FROM wallet_links wl
+          LEFT JOIN traders ta ON ta.address = wl.address_a
+          LEFT JOIN traders tb ON tb.address = wl.address_b
+          LEFT JOIN trader_metrics tma ON tma.address = wl.address_a
+          LEFT JOIN trader_metrics tmb ON tmb.address = wl.address_b
+         WHERE wl.score >= ?
+    """
+    params: list = [min_score]
+    if reason:
+        q += " AND wl.reason LIKE ?"
+        params.append(f"%{reason}%")
+    q += " ORDER BY wl.score DESC LIMIT ?"
+    params.append(limit)
+    rows = db.conn.execute(q, params).fetchall()
+    table = Table(title=f"Suspected linked wallets (≥{min_score:.2f})")
+    for col in ("score", "reason", "wallet A", "PnL A", "wallet B", "PnL B"):
+        table.add_column(col)
+    for r in rows:
+        table.add_row(
+            f"{r['score']:.2f}",
+            r["reason"],
+            f"{r['address_a'][:10]}… {r['name_a'] or ''}".strip(),
+            f"{r['pnl_a'] or 0:+,.0f}",
+            f"{r['address_b'][:10]}… {r['name_b'] or ''}".strip(),
+            f"{r['pnl_b'] or 0:+,.0f}",
+        )
+    console.print(table)
+    db.close()
+
+
+@report_app.command("wallet")
+def report_wallet(
+    address: str,
+    config: str = typer.Option(None),
+) -> None:
+    """Detailed view for a single wallet."""
+    cfg, db = _setup(config)
+    addr = address.lower()
+    m = db.conn.execute(
+        "SELECT * FROM trader_metrics WHERE address=?", (addr,)
+    ).fetchone()
+    if not m:
+        console.print(f"[yellow]no metrics for {addr} — run analyze first[/yellow]")
+        db.close()
+        return
+    console.print(f"[bold]{addr}[/bold]")
+    console.print(
+        f"  trades={m['trade_count']}  volume=${m['volume_usdc']:,.0f}  "
+        f"pnl=${m['realized_pnl']:+,.0f}  roi={(m['roi'] or 0)*100:+.1f}%  "
+        f"win_rate={(m['win_rate'] or 0)*100:.0f}%  sharpe={m['sharpe_like'] or 0:.2f}"
+    )
+    notes = m["notes"]
+    if notes:
+        console.print(f"  patterns: {notes}")
+    links = db.conn.execute(
+        """
+        SELECT address_b AS other, score, reason FROM wallet_links WHERE address_a=?
+        UNION
+        SELECT address_a AS other, score, reason FROM wallet_links WHERE address_b=?
+        ORDER BY score DESC LIMIT 10
+        """,
+        (addr, addr),
+    ).fetchall()
+    if links:
+        t = Table(title="Suspected linked wallets")
+        for col in ("score", "reason", "wallet"):
+            t.add_column(col)
+        for r in links:
+            t.add_row(f"{r['score']:.2f}", r["reason"], r["other"])
+        console.print(t)
     db.close()
 
 

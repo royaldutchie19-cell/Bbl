@@ -52,10 +52,35 @@ class AnalyzerConfig:
 
 
 @dataclass
+class OnchainConfig:
+    """Polygon RPC for funding-graph enrichment.
+
+    Use any HTTPS RPC — public ones rate-limit aggressively, so plug in
+    your own (Alchemy/Infura/QuickNode) for serious work via env var
+    BBL_POLYGON_RPC.
+    """
+
+    rpc_url: str = os.getenv("BBL_POLYGON_RPC", "https://polygon-rpc.com")
+    # Two USDC contracts live on Polygon: bridged USDC.e and native USDC.
+    # We watch transfers to proxy wallets on both.
+    usdc_addresses: tuple[str, ...] = (
+        "0x2791bca1f2de4661ed88a30c99a7a9449aa84174",  # USDC.e (bridged)
+        "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",  # native USDC
+    )
+    # eth_getLogs window — keep small to stay under public-RPC limits.
+    log_block_step: int = 2000
+    # Lookback when we have no anchor block for a wallet. ~1 month of Polygon
+    # at ~2.2s blocks ≈ 1.2M blocks; we cap at 250k to bound cost.
+    initial_lookback_blocks: int = 250_000
+    request_timeout_s: float = 30.0
+
+
+@dataclass
 class Config:
     api: APIConfig = field(default_factory=APIConfig)
     collector: CollectorConfig = field(default_factory=CollectorConfig)
     analyzer: AnalyzerConfig = field(default_factory=AnalyzerConfig)
+    onchain: OnchainConfig = field(default_factory=OnchainConfig)
     data_dir: Path = DEFAULT_DATA_DIR
     db_path: Path = DEFAULT_DB_PATH
     log_level: str = os.getenv("BBL_LOG_LEVEL", "INFO")
@@ -77,7 +102,7 @@ class Config:
 
 
 def _merge(cfg: Config, raw: dict) -> Config:
-    for section in ("api", "collector", "analyzer"):
+    for section in ("api", "collector", "analyzer", "onchain"):
         if section in raw:
             target = getattr(cfg, section)
             for k, v in raw[section].items():

@@ -33,27 +33,34 @@ bbl init
 # 2. one-shot: pull markets + leaderboard + recent trades
 bbl collect once --collectors markets,trades,leaderboard
 
-# 3. long-running: three parallel "runs" on independent schedules
-bbl collect run --collectors markets,trades,leaderboard
+# 3. long-running: six parallel "runs" on independent schedules
+bbl collect run --collectors markets,trades,leaderboard,prices,orderbooks,resolutions
 
-# 4. see what's in the DB
-bbl status
-bbl markets list --limit 20
+# 4. backfill historical trades for top wallets (so the analyzer has data)
+bbl backfill top --limit 200 --since-days 90
+
+# 5. on-chain funding enrichment (needs Polygon RPC; public one works but slow)
+bbl onchain funding --limit 100
+
+# 6. analyze everything
+bbl analyze all --include-funding
+
+# 7. read the reports
+bbl report traders --limit 25
+bbl report links --min-score 0.4
+bbl report wallet 0xabc...
 bbl leaderboard top --metric profit --window all
-
-# 5. analyze (after you've collected some data)
-bbl analyze all
 ```
 
 ## Running multiple collectors in parallel
 
-All five collectors can run concurrently in a single process — each has its
+All six collectors can run concurrently in a single process — each has its
 own polling interval in `config.yaml`. You can also split them across shells
 (three terminals = three "runs"):
 
 ```bash
-# terminal 1 — catalog + leaderboard (slow cadence)
-bbl collect run --collectors markets,leaderboard
+# terminal 1 — catalog + leaderboard + resolutions (slow cadence)
+bbl collect run --collectors markets,leaderboard,resolutions
 
 # terminal 2 — trades firehose
 bbl collect run --collectors trades
@@ -67,7 +74,7 @@ other. All write to the same SQLite DB (WAL mode).
 
 ## Analyzer
 
-Three stages, meant to be run in this order:
+Four stages, meant to be run in this order (roughly):
 
 1. `bbl analyze metrics` — compute per-wallet performance (PnL, ROI, win-rate,
    Sharpe-like, holding time, drawdown, early-entry score, markets traded).
@@ -78,15 +85,38 @@ Three stages, meant to be run in this order:
    and a contrarian-vs-momentum score based on trade price vs. mid at the
    time of the fill.
 
-3. `bbl analyze links` — pairwise wallet linking. For each profitable wallet,
-   find counterparties that repeatedly trade the same token/side within a
-   short window, then combine with behavioral fingerprint similarity (hour
-   distribution, log-size distribution) and a new-wallet prior. Writes to
-   `wallet_links` with a reason-tag string and evidence JSON.
+3. `bbl analyze links` — pairwise wallet linking based on **trading
+   behavior**. For each profitable wallet, find counterparties that
+   repeatedly trade the same token/side within a short window, then combine
+   with behavioral fingerprint similarity (hour distribution, log-size
+   distribution) and a new-wallet prior.
 
-The output `wallet_links` is the main thing a copytrade bot should consume:
+4. `bbl onchain funding` + `bbl analyze all --include-funding` — pull USDC
+   inbound transfers from Polygon RPC, build a per-funder graph, and merge
+   shared-funder pairs into `wallet_links`. Exchange hot wallets (funders
+   that serve hundreds of proxies) are auto-down-weighted so the score
+   reflects *meaningful* shared funders only. This is the strongest signal
+   for detecting fresh wallets of known top traders.
+
+The combined `wallet_links` is the main thing a copytrade bot should consume:
 *"Wallet X is probably a fresh identity of known-top wallet Y with score 0.78
-(reasons: timing, fingerprint, new_wallet) — backed by 34 overlapping fills."*
+(reasons: timing,fingerprint,funding) — backed by 34 overlapping fills and
+2 shared unique funders."*
+
+## Backfill
+
+Live collection only captures data from the moment you start. To give the
+analyzer real history:
+
+```bash
+# one specific wallet, full history (up to 200 pages × 500 trades)
+bbl backfill wallet 0xabc...
+
+# top-200 profit leaderboard, last 90 days
+bbl backfill top --limit 200 --since-days 90
+```
+
+Backfill is safe to run repeatedly — trades dedupe on `trade_id`.
 
 ## Watchlist
 
@@ -103,9 +133,16 @@ never miss a fill, regardless of global-feed pagination.
 Copy `config.example.yaml` to `config.yaml` and edit. Every field is
 optional — defaults live in `src/bbl/config.py`.
 
+For on-chain funding: set `BBL_POLYGON_RPC` env var (or `onchain.rpc_url`
+in config.yaml) to a serious RPC endpoint if you're scanning many wallets.
+Public RPCs rate-limit aggressively and have small `getLogs` block
+windows; configurable via `onchain.log_block_step`.
+
 ## Next steps (not yet implemented)
 
-- On-chain funding-graph enrichment (RPC → wallet_links score boost)
-- Copytrade executor (signing orders via `py-clob-client` + position sizing)
+- WebSocket feeds (trades + orderbook) in place of polling — lower latency,
+  lower API footprint
+- Copytrade executor (signing orders via `py-clob-client` + position sizing,
+  slippage, watchlist weight)
 - Notification layer (fresh high-score wallet_link → webhook)
 - Backtest harness over historical `price_snapshots` + `trades`

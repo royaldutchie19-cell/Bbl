@@ -179,7 +179,9 @@ class Database:
                 ts = _coerce_ts(t.get("timestamp") or t.get("ts") or t.get("time"))
                 price = _f(t.get("price"))
                 size = _f(t.get("size") or t.get("amount") or t.get("shares"))
-                usdc = (price or 0) * (size or 0)
+                usdc = _f(t.get("usdcSize") or t.get("usdc_size"))
+                if usdc is None:
+                    usdc = (price or 0) * (size or 0)
                 cur.execute(
                     """
                     INSERT OR IGNORE INTO trades

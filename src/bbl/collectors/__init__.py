@@ -5,6 +5,7 @@ from bbl.collectors.leaderboard import LeaderboardCollector
 from bbl.collectors.markets import MarketsCollector
 from bbl.collectors.orderbooks import OrderbookCollector
 from bbl.collectors.prices import PricesCollector
+from bbl.collectors.resolutions import ResolutionsCollector
 from bbl.collectors.trades import TradesCollector
 
 ALL_COLLECTORS = {
@@ -13,6 +14,7 @@ ALL_COLLECTORS = {
     "orderbooks": OrderbookCollector,
     "trades": TradesCollector,
     "leaderboard": LeaderboardCollector,
+    "resolutions": ResolutionsCollector,
 }
 
 __all__ = [
@@ -23,5 +25,6 @@ __all__ = [
     "MarketsCollector",
     "OrderbookCollector",
     "PricesCollector",
+    "ResolutionsCollector",
     "TradesCollector",
 ]
