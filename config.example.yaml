@@ -1,0 +1,28 @@
+# bbl — Polymarket copytrade/analyzer config
+# Copy this file to config.yaml and edit as needed.
+
+data_dir: ./data
+log_level: INFO
+
+api:
+  gamma_base: https://gamma-api.polymarket.com
+  clob_base: https://clob.polymarket.com
+  data_base: https://data-api.polymarket.com
+  request_timeout_s: 30
+  max_concurrency: 8
+  rps: 5.0
+
+collector:
+  markets_interval_s: 300
+  prices_interval_s: 30
+  orderbook_interval_s: 60
+  trades_interval_s: 60
+  leaderboard_interval_s: 900
+  top_markets_limit: 200
+
+analyzer:
+  min_trades_for_ranking: 20
+  min_volume_usdc: 1000
+  link_time_window_s: 120
+  link_min_overlap: 5
+  new_wallet_max_age_days: 30
