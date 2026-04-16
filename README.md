@@ -24,6 +24,27 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[analyze]"
 ```
 
+## Dashboard
+
+Streamlit UI with 7 pages — reads straight from the SQLite DB, safe to run
+alongside live collectors (WAL mode, read-only queries):
+
+```bash
+pip install -e ".[dashboard]"
+bbl dashboard            # → http://localhost:8501
+bbl dashboard --port 9000
+```
+
+Pages:
+- **Overview** — row counts, recent collector runs, 7-day volume chart
+- **Traders** — sortable trader_metrics table + PnL histogram + ROI/volume bubble
+- **Leaderboard** — current top, plus rank history chart for any wallet
+- **Markets** — searchable market list + per-token price chart
+- **Wallet** — deep-dive per wallet: metrics, trades, cumulative PnL,
+  suspected linked wallets, funders
+- **Linked Wallets** — score-filtered list with reason tag + evidence JSON
+- **Collector Health** — runs/errors per collector, last-run timestamps
+
 ## Quick start
 
 ```bash

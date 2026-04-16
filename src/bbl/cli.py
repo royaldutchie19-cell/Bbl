@@ -569,5 +569,40 @@ def status(config: str = typer.Option(None)) -> None:
     db.close()
 
 
+# ---------------------------------------------------------------- dashboard
+
+
+@app.command()
+def dashboard(
+    port: int = typer.Option(8501, help="Streamlit port"),
+    host: str = typer.Option("localhost"),
+    config: str = typer.Option(None),
+) -> None:
+    """Launch the Streamlit dashboard.
+
+    Equivalent to: `streamlit run src/bbl/dashboard.py`.
+    Requires the `dashboard` extras: `pip install -e ".[dashboard]"`.
+    """
+    import subprocess
+    import sys
+
+    try:
+        import streamlit  # noqa: F401
+    except ImportError:
+        console.print("[red]streamlit not installed[/red] — run `pip install -e \".[dashboard]\"`")
+        raise typer.Exit(code=1) from None
+
+    _setup(config)  # ensures DB dir exists + logging
+    module_path = Path(__file__).parent / "dashboard.py"
+    cmd = [
+        sys.executable, "-m", "streamlit", "run", str(module_path),
+        "--server.port", str(port),
+        "--server.address", host,
+        "--browser.gatherUsageStats", "false",
+    ]
+    console.print(f"[green]launching dashboard[/green] → http://{host}:{port}")
+    subprocess.run(cmd, check=False)
+
+
 if __name__ == "__main__":
     app()
