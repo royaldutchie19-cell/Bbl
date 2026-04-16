@@ -91,11 +91,12 @@ if page == "Overview":
 
     tables = [
         ("markets", "Markets"),
+        ("events", "Events"),
         ("trades", "Trades"),
         ("traders", "Traders"),
-        ("leaderboard_snapshots", "Leaderboard rows"),
-        ("trader_metrics", "Analyzed traders"),
-        ("wallet_links", "Suspected links"),
+        ("price_history", "Candles"),
+        ("trader_metrics", "Analyzed"),
+        ("wallet_links", "Links"),
         ("funding_transfers", "Funding txs"),
     ]
     cols = st.columns(len(tables))

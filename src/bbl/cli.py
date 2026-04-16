@@ -33,6 +33,7 @@ from bbl.analyzer import (
 from bbl.backfill import backfill_top_traders, backfill_wallet
 from bbl.collectors import ALL_COLLECTORS
 from bbl.config import Config
+from bbl.enrich import enrich_market_holders, enrich_top_traders, enrich_wallet
 from bbl.orchestrator import build_collectors, run_collectors_forever
 from bbl.storage import Database
 
@@ -47,6 +48,7 @@ analyze_app = typer.Typer(help="Analyzer")
 leaderboard_app = typer.Typer(help="Leaderboard")
 watchlist_app = typer.Typer(help="Watchlist (wallets to copy/track)")
 backfill_app = typer.Typer(help="Historical backfill")
+enrich_app = typer.Typer(help="Per-wallet enrichment (positions, pnl, portfolio, rewards)")
 onchain_app = typer.Typer(help="On-chain (Polygon) enrichment")
 report_app = typer.Typer(help="Reports")
 app.add_typer(collect_app, name="collect")
@@ -55,6 +57,7 @@ app.add_typer(analyze_app, name="analyze")
 app.add_typer(leaderboard_app, name="leaderboard")
 app.add_typer(watchlist_app, name="watchlist")
 app.add_typer(backfill_app, name="backfill")
+app.add_typer(enrich_app, name="enrich")
 app.add_typer(onchain_app, name="onchain")
 app.add_typer(report_app, name="report")
 
@@ -253,6 +256,61 @@ def backfill_top(
         )
     )
     console.print(f"[green]{n}[/green] trades backfilled across top {limit}")
+    db.close()
+
+
+# ------------------------------------------------------------------ enrich
+
+
+@enrich_app.command("wallet")
+def enrich_one(
+    address: str,
+    no_positions: bool = typer.Option(False),
+    no_pnl: bool = typer.Option(False),
+    no_portfolio: bool = typer.Option(False),
+    no_rewards: bool = typer.Option(False),
+    config: str = typer.Option(None),
+) -> None:
+    """Deep-pull positions/pnl/portfolio/rewards for a single wallet."""
+    cfg, db = _setup(config)
+    stats = asyncio.run(
+        enrich_wallet(
+            cfg, db, address,
+            positions=not no_positions,
+            pnl=not no_pnl,
+            portfolio=not no_portfolio,
+            rewards=not no_rewards,
+        )
+    )
+    console.print(f"[green]{address}[/green]: {stats}")
+    db.close()
+
+
+@enrich_app.command("top")
+def enrich_top(
+    limit: int = typer.Option(50),
+    metric: str = typer.Option("profit"),
+    window: str = typer.Option("all"),
+    config: str = typer.Option(None),
+) -> None:
+    """Enrich the top-N wallets on a leaderboard in parallel."""
+    cfg, db = _setup(config)
+    totals = asyncio.run(
+        enrich_top_traders(cfg, db, limit=limit, metric=metric, window=window)
+    )
+    console.print(f"[green]done[/green] totals: {totals}")
+    db.close()
+
+
+@enrich_app.command("holders")
+def enrich_holders(
+    limit: int = typer.Option(50),
+    config: str = typer.Option(None),
+) -> None:
+    """Snapshot top holders for the N highest-volume active markets."""
+    cfg, db = _setup(config)
+    n = asyncio.run(enrich_market_holders(cfg, db, limit=limit))
+    console.print(f"[green]{n}[/green] holder rows inserted")
     db.close()
 
 
@@ -539,11 +597,20 @@ def status(config: str = typer.Option(None)) -> None:
     """Show counts and most-recent collector runs."""
     cfg, db = _setup(config)
     counts = {}
-    for tbl in ("markets", "market_tokens", "price_snapshots",
-                "orderbook_snapshots", "trades", "traders",
-                "leaderboard_snapshots", "positions",
-                "trader_metrics", "wallet_links", "watchlist"):
-        counts[tbl] = db.conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+    for tbl in (
+        "markets", "market_tokens", "events", "tags",
+        "price_snapshots", "price_history", "orderbook_snapshots",
+        "trades", "traders", "leaderboard_snapshots",
+        "positions", "market_holders",
+        "user_value_series", "user_pnl_series", "user_rewards",
+        "trader_metrics", "wallet_links",
+        "funding_transfers", "wallet_funders",
+        "watchlist",
+    ):
+        try:
+            counts[tbl] = db.conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+        except Exception:
+            counts[tbl] = 0
     t = Table(title="DB row counts")
     t.add_column("table")
     t.add_column("rows", justify="right")

@@ -306,6 +306,186 @@ class Database:
                 rows += 1
         return rows
 
+    # ------------------------------------------------------ price history
+
+    def insert_price_history(
+        self,
+        *,
+        token_id: str,
+        fidelity: int,
+        candles: Iterable[dict[str, Any]],
+    ) -> int:
+        rows = 0
+        with self.tx() as cur:
+            for c in candles:
+                ts = _coerce_ts(c.get("t") or c.get("timestamp") or c.get("ts"))
+                price = _f(c.get("p") or c.get("price") or c.get("close"))
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO price_history
+                      (token_id, fidelity, ts, price, open, high, low, close, volume)
+                    VALUES (?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        token_id,
+                        int(fidelity),
+                        ts,
+                        price,
+                        _f(c.get("o") or c.get("open")),
+                        _f(c.get("h") or c.get("high")),
+                        _f(c.get("l") or c.get("low")),
+                        _f(c.get("c") or c.get("close")),
+                        _f(c.get("v") or c.get("volume")),
+                    ),
+                )
+                rows += 1
+        return rows
+
+    # ---------------------------------------------- per-user time series
+
+    def insert_user_value_series(
+        self, address: str, series: Iterable[dict[str, Any]]
+    ) -> int:
+        rows = 0
+        with self.tx() as cur:
+            for p in _normalize_series(series):
+                cur.execute(
+                    "INSERT OR REPLACE INTO user_value_series (address, ts, value_usdc) VALUES (?,?,?)",
+                    (address.lower(), p["ts"], p["value"]),
+                )
+                rows += 1
+        return rows
+
+    def insert_user_pnl_series(
+        self, address: str, series: Iterable[dict[str, Any]]
+    ) -> int:
+        rows = 0
+        with self.tx() as cur:
+            for p in _normalize_series(series):
+                cur.execute(
+                    "INSERT OR REPLACE INTO user_pnl_series (address, ts, pnl) VALUES (?,?,?)",
+                    (address.lower(), p["ts"], p["value"]),
+                )
+                rows += 1
+        return rows
+
+    def insert_user_rewards(
+        self, address: str, entries: Iterable[dict[str, Any]]
+    ) -> int:
+        rows = 0
+        with self.tx() as cur:
+            for e in entries:
+                ts = _coerce_ts(e.get("timestamp") or e.get("ts") or e.get("date"))
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO user_rewards
+                        (address, ts, source, amount_usdc, raw_json)
+                    VALUES (?,?,?,?,?)
+                    """,
+                    (
+                        address.lower(),
+                        ts,
+                        e.get("source") or e.get("type") or "reward",
+                        _f(e.get("amount") or e.get("value") or e.get("usdc")),
+                        json.dumps(e, default=str),
+                    ),
+                )
+                rows += 1
+        return rows
+
+    def insert_market_holders(
+        self, condition_id: str, ts: int, holders: Iterable[dict[str, Any]]
+    ) -> int:
+        rows = 0
+        with self.tx() as cur:
+            for h in holders:
+                addr = (h.get("proxyWallet") or h.get("address") or h.get("user") or "").lower()
+                if not addr:
+                    continue
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO market_holders
+                        (ts, condition_id, token_id, address, shares, usdc_value)
+                    VALUES (?,?,?,?,?,?)
+                    """,
+                    (
+                        ts,
+                        condition_id,
+                        h.get("asset") or h.get("tokenId") or h.get("token_id"),
+                        addr,
+                        _f(h.get("shares") or h.get("size")),
+                        _f(h.get("value") or h.get("usdcValue") or h.get("usdc_value")),
+                    ),
+                )
+                rows += 1
+        return rows
+
+    # ----------------------------------------------------------- events
+
+    def upsert_events(self, events: Iterable[dict[str, Any]]) -> int:
+        now = int(time.time())
+        rows = 0
+        with self.tx() as cur:
+            for e in events:
+                eid = str(e.get("id") or e.get("eventId") or e.get("event_id") or "")
+                if not eid:
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO events (event_id, slug, title, description, category,
+                        volume_usdc, liquidity_usdc, start_date, end_date,
+                        active, closed, featured, raw_json, first_seen_ts, last_seen_ts)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(event_id) DO UPDATE SET
+                        title=excluded.title,
+                        description=excluded.description,
+                        category=excluded.category,
+                        volume_usdc=excluded.volume_usdc,
+                        liquidity_usdc=excluded.liquidity_usdc,
+                        active=excluded.active,
+                        closed=excluded.closed,
+                        featured=excluded.featured,
+                        raw_json=excluded.raw_json,
+                        last_seen_ts=excluded.last_seen_ts
+                    """,
+                    (
+                        eid,
+                        e.get("slug"),
+                        e.get("title") or e.get("name"),
+                        e.get("description"),
+                        e.get("category"),
+                        _f(e.get("volume") or e.get("volumeNum")) or 0,
+                        _f(e.get("liquidity") or e.get("liquidityNum")) or 0,
+                        e.get("startDate") or e.get("start_date"),
+                        e.get("endDate") or e.get("end_date"),
+                        int(bool(e.get("active", True))),
+                        int(bool(e.get("closed", False))),
+                        int(bool(e.get("featured", False))),
+                        json.dumps(e, default=str),
+                        now,
+                        now,
+                    ),
+                )
+                rows += 1
+        return rows
+
+    def upsert_tags(self, tags: Iterable[dict[str, Any]]) -> int:
+        rows = 0
+        with self.tx() as cur:
+            for t in tags:
+                tid = str(t.get("id") or t.get("slug") or "")
+                if not tid:
+                    continue
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO tags (tag_id, slug, label, raw_json)
+                    VALUES (?,?,?,?)
+                    """,
+                    (tid, t.get("slug"), t.get("label"), json.dumps(t, default=str)),
+                )
+                rows += 1
+        return rows
+
     # ------------------------------------------------------ collector log
 
     def log_run(
@@ -343,6 +523,32 @@ class Database:
 
 
 # ---------------------------------------------------------- helpers
+
+
+def _normalize_series(series: Iterable[Any]) -> list[dict[str, Any]]:
+    """Accept heterogeneous PnL/value responses and normalize to {ts, value}.
+
+    Shapes we see in the wild:
+        [{"t": 1700000000, "p": 123.4}]
+        [{"timestamp": 1700000000, "value": 123.4}]
+        {"history": [...]}  # wrapped
+    """
+    out: list[dict[str, Any]] = []
+    if isinstance(series, dict):
+        series = series.get("history") or series.get("data") or []
+    for p in series or []:
+        if not isinstance(p, dict):
+            continue
+        ts = _coerce_ts(p.get("t") or p.get("timestamp") or p.get("ts") or p.get("time"))
+        val = _f(
+            p.get("p")
+            if "p" in p
+            else (p.get("v") or p.get("value") or p.get("pnl") or p.get("amount"))
+        )
+        if ts is None or val is None:
+            continue
+        out.append({"ts": ts, "value": val})
+    return out
 
 
 def _f(x: Any) -> float | None:

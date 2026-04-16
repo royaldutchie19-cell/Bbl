@@ -54,24 +54,52 @@ bbl init
 # 2. one-shot: pull markets + leaderboard + recent trades
 bbl collect once --collectors markets,trades,leaderboard
 
-# 3. long-running: six parallel "runs" on independent schedules
-bbl collect run --collectors markets,trades,leaderboard,prices,orderbooks,resolutions
+# 3. long-running: all collectors on independent schedules
+bbl collect run --collectors markets,events,trades,leaderboard,prices,price_history,orderbooks,resolutions
 
 # 4. backfill historical trades for top wallets (so the analyzer has data)
 bbl backfill top --limit 200 --since-days 90
 
-# 5. on-chain funding enrichment (needs Polygon RPC; public one works but slow)
+# 5. per-wallet deep enrichment (positions, pnl, portfolio-value, rewards)
+bbl enrich top --limit 50
+
+# 6. top-holders snapshot per market
+bbl enrich holders --limit 50
+
+# 7. on-chain funding enrichment (needs Polygon RPC; public one works but slow)
 bbl onchain funding --limit 100
 
-# 6. analyze everything
+# 8. analyze everything
 bbl analyze all --include-funding
 
-# 7. read the reports
+# 9. read the reports
 bbl report traders --limit 25
 bbl report links --min-score 0.4
 bbl report wallet 0xabc...
 bbl leaderboard top --metric profit --window all
+
+# 10. dashboard
+bbl dashboard
 ```
+
+## All endpoints covered
+
+The three clients expose every public endpoint I'm aware of:
+
+- **Gamma** — `/markets`, `/events`, `/tags`, `/series`, `/comments`
+  (list/get/paginated variants).
+- **CLOB** — `/markets`, `/simplified-markets`, `/sampling-markets`,
+  `/book(s)`, `/price`, `/midpoint(s)`, `/spread(s)`, `/last-trade-price`,
+  `/last-trades-prices`, `/prices-history` (OHLC candles), `/trades`,
+  `/rewards/markets`, `/rewards/user/{addr}`, `/rewards/earnings`.
+- **Data API** — `/trades`, `/activity`, `/positions`, `/holders`,
+  `/leaderboard`, `/user/{addr}`, `/username/{name}`, `/value`, `/pnl`,
+  `/portfolio-value`, `/volume`, `/traded-markets`, `/rewards`, `/earnings`.
+
+Some data-api endpoints are observed from the web app's network traffic
+(not officially documented). Field names are best-effort — if something
+looks off after a live run, it's probably in `src/bbl/storage/db.py`
+where the mapping lives.
 
 ## Running multiple collectors in parallel
 

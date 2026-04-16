@@ -184,6 +184,99 @@ CREATE TABLE IF NOT EXISTS watchlist (
     notes        TEXT
 );
 
+-- ----------------------------------------------------------- price history
+
+-- OHLC candles from CLOB /prices-history. One row per (token, fidelity, ts).
+-- fidelity is minutes-per-candle (1, 60, 360, 1440, ...). Price is
+-- midpoint-based; some fields may be NULL depending on CLOB version.
+CREATE TABLE IF NOT EXISTS price_history (
+    token_id    TEXT    NOT NULL,
+    fidelity    INTEGER NOT NULL,
+    ts          INTEGER NOT NULL,
+    price       REAL,
+    open        REAL,
+    high        REAL,
+    low         REAL,
+    close       REAL,
+    volume      REAL,
+    PRIMARY KEY (token_id, fidelity, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_price_history_token ON price_history(token_id, ts);
+
+-- ---------------------------------------------------- per-user time series
+
+-- Portfolio value series (from data-api /portfolio-value).
+CREATE TABLE IF NOT EXISTS user_value_series (
+    address    TEXT    NOT NULL,
+    ts         INTEGER NOT NULL,
+    value_usdc REAL,
+    PRIMARY KEY (address, ts)
+);
+
+-- PnL series (from data-api /pnl).
+CREATE TABLE IF NOT EXISTS user_pnl_series (
+    address TEXT    NOT NULL,
+    ts      INTEGER NOT NULL,
+    pnl     REAL,
+    PRIMARY KEY (address, ts)
+);
+
+-- Rewards / earnings log per user.
+CREATE TABLE IF NOT EXISTS user_rewards (
+    address      TEXT    NOT NULL,
+    ts           INTEGER NOT NULL,
+    source       TEXT,                -- e.g. "liquidity", "trading", "referral"
+    amount_usdc  REAL,
+    raw_json     TEXT,
+    PRIMARY KEY (address, ts, source)
+);
+
+-- Top holders per market (who owns the resolved tokens).
+CREATE TABLE IF NOT EXISTS market_holders (
+    ts            INTEGER NOT NULL,
+    condition_id  TEXT    NOT NULL,
+    token_id      TEXT,
+    address       TEXT    NOT NULL,
+    shares        REAL,
+    usdc_value    REAL,
+    PRIMARY KEY (ts, condition_id, address, token_id)
+);
+CREATE INDEX IF NOT EXISTS idx_holders_market ON market_holders(condition_id, ts);
+CREATE INDEX IF NOT EXISTS idx_holders_addr   ON market_holders(address, ts);
+
+-- ----------------------------------------------------------------- events
+
+-- Events group related markets (e.g. a Super Bowl event has one market per
+-- team outcome). Useful for the analyzer to see if a wallet specializes in
+-- certain event types.
+CREATE TABLE IF NOT EXISTS events (
+    event_id       TEXT PRIMARY KEY,
+    slug           TEXT,
+    title          TEXT,
+    description    TEXT,
+    category       TEXT,
+    volume_usdc    REAL,
+    liquidity_usdc REAL,
+    start_date     TEXT,
+    end_date       TEXT,
+    active         INTEGER DEFAULT 1,
+    closed         INTEGER DEFAULT 0,
+    featured       INTEGER DEFAULT 0,
+    raw_json       TEXT,
+    first_seen_ts  INTEGER NOT NULL,
+    last_seen_ts   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_category ON events(category);
+CREATE INDEX IF NOT EXISTS idx_events_volume   ON events(volume_usdc DESC);
+
+-- Gamma tags. Markets can belong to multiple tags.
+CREATE TABLE IF NOT EXISTS tags (
+    tag_id   TEXT PRIMARY KEY,
+    slug     TEXT,
+    label    TEXT,
+    raw_json TEXT
+);
+
 -- ----------------------------------------------------------------- on-chain
 
 -- Inbound USDC transfers to Polymarket proxy wallets. Used to recover the
