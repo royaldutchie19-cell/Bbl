@@ -175,68 +175,136 @@ if page == "Overview":
 
 elif page == "Traders":
     st.title("Trader performance")
-    c1, c2, c3 = st.columns([2, 2, 2])
-    sort_by = c1.selectbox(
-        "Sort by",
-        ["realized_pnl", "roi", "sharpe_like", "win_rate", "volume_usdc", "trade_count"],
-        index=0,
-    )
-    min_trades = c2.number_input("Min trades", 0, 10000, 20, 10)
-    limit = c3.number_input("Rows", 10, 2000, 100, 10)
 
-    df = _q(
-        db_path,
-        f"""
-        SELECT tm.address, t.username, tm.trade_count, tm.volume_usdc,
-               tm.realized_pnl, tm.roi, tm.win_rate, tm.sharpe_like,
-               tm.markets_traded, tm.avg_trade_size, tm.max_drawdown,
-               tm.early_entry_score, tm.contrarian_score, tm.notes
-          FROM trader_metrics tm
-          LEFT JOIN traders t ON t.address = tm.address
-         WHERE tm.trade_count >= ?
-         ORDER BY tm.{sort_by} DESC
-         LIMIT ?
-        """,
-        (int(min_trades), int(limit)),
-    )
-    if df.empty:
-        st.info("No analyzed traders yet — run `bbl analyze all`.")
+    view = st.radio("Data source", ["API PnL (leaderboard)", "Analyzer (FIFO)"], horizontal=True)
+
+    if view == "API PnL (leaderboard)":
+        c1, c2, c3 = st.columns([2, 2, 2])
+        sort_by = c1.selectbox("Sort by", ["pnl", "volume", "trade_count"], index=0)
+        min_trades = c2.number_input("Min trades", 0, 10000, 0, 10)
+        limit = c3.number_input("Rows", 10, 2000, 100, 10)
+
+        sort_col = {
+            "pnl": "COALESCE(t.total_pnl_usdc, 0)",
+            "volume": "COALESCE(t.total_volume_usdc, 0)",
+            "trade_count": "COALESCE(t.trade_count, 0)",
+        }[sort_by]
+
+        df = _q(
+            db_path,
+            f"""
+            SELECT t.address, t.username,
+                   COALESCE(t.total_pnl_usdc, 0) AS pnl,
+                   COALESCE(t.total_volume_usdc, 0) AS volume,
+                   COALESCE(t.trade_count, 0) AS trade_count,
+                   tm.realized_pnl AS analyzer_pnl,
+                   tm.roi, tm.win_rate, tm.sharpe_like, tm.markets_traded
+              FROM traders t
+              LEFT JOIN trader_metrics tm ON tm.address = t.address
+             WHERE COALESCE(t.trade_count, 0) >= ?
+             ORDER BY {sort_col} DESC
+             LIMIT ?
+            """,
+            (int(min_trades), int(limit)),
+        )
+        if df.empty:
+            st.info("No traders yet — run `bbl collect once --collectors leaderboard`.")
+        else:
+            df["short"] = df["address"].apply(_fmt_addr)
+            col_order = [
+                "short", "username", "pnl", "volume", "trade_count",
+                "analyzer_pnl", "roi", "win_rate", "sharpe_like", "markets_traded",
+            ]
+            present = [c for c in col_order if c in df.columns]
+            fmt = {
+                "pnl": "${:+,.0f}", "volume": "${:,.0f}",
+                "analyzer_pnl": "${:+,.0f}", "roi": "{:+.1%}",
+                "win_rate": "{:.0%}", "sharpe_like": "{:.2f}",
+            }
+            st.dataframe(
+                df[present].style.format(
+                    {k: v for k, v in fmt.items() if k in present},
+                    na_rep="—",
+                ),
+                use_container_width=True, hide_index=True, height=520,
+            )
+
+            st.subheader("PnL distribution (API)")
+            fig = px.histogram(df, x="pnl", nbins=40, title=None)
+            fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0))
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.subheader("PnL vs. volume (bubble = trade count)")
+            fig2 = px.scatter(
+                df, x="volume", y="pnl",
+                size=df["trade_count"].clip(lower=1),
+                hover_data=["short", "username"],
+                log_x=True,
+            )
+            fig2.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0))
+            st.plotly_chart(fig2, use_container_width=True)
+
     else:
-        df["short"] = df["address"].apply(_fmt_addr)
-        col_order = [
-            "short", "username", "trade_count", "volume_usdc", "realized_pnl",
-            "roi", "win_rate", "sharpe_like", "markets_traded",
-            "avg_trade_size", "max_drawdown", "early_entry_score", "contrarian_score",
-        ]
-        st.dataframe(
-            df[col_order].style.format({
-                "volume_usdc": "${:,.0f}",
-                "realized_pnl": "${:+,.0f}",
-                "roi": "{:+.1%}",
-                "win_rate": "{:.0%}",
-                "sharpe_like": "{:.2f}",
-                "avg_trade_size": "${:,.0f}",
-                "max_drawdown": "${:,.0f}",
-                "early_entry_score": "{:.2f}",
-                "contrarian_score": "{:+.2f}",
-            }),
-            use_container_width=True,
-            hide_index=True,
-            height=520,
+        c1, c2, c3 = st.columns([2, 2, 2])
+        sort_by = c1.selectbox(
+            "Sort by",
+            ["realized_pnl", "roi", "sharpe_like", "win_rate", "volume_usdc", "trade_count"],
+            index=0,
         )
+        min_trades = c2.number_input("Min trades", 0, 10000, 20, 10)
+        limit = c3.number_input("Rows", 10, 2000, 100, 10)
 
-        st.subheader("PnL distribution")
-        fig = px.histogram(df, x="realized_pnl", nbins=40, title=None)
-        fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0))
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("ROI vs. volume (bubble = trade count)")
-        fig2 = px.scatter(
-            df, x="volume_usdc", y="roi", size="trade_count", hover_data=["short", "username"],
-            log_x=True,
+        df = _q(
+            db_path,
+            f"""
+            SELECT tm.address, t.username, tm.trade_count, tm.volume_usdc,
+                   tm.realized_pnl, tm.roi, tm.win_rate, tm.sharpe_like,
+                   tm.markets_traded, tm.avg_trade_size, tm.max_drawdown,
+                   tm.early_entry_score, tm.contrarian_score
+              FROM trader_metrics tm
+              LEFT JOIN traders t ON t.address = tm.address
+             WHERE tm.trade_count >= ?
+             ORDER BY tm.{sort_by} DESC
+             LIMIT ?
+            """,
+            (int(min_trades), int(limit)),
         )
-        fig2.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0))
-        st.plotly_chart(fig2, use_container_width=True)
+        if df.empty:
+            st.info("No analyzed traders yet — run `bbl backfill top` then `bbl analyze all`.")
+        else:
+            df["short"] = df["address"].apply(_fmt_addr)
+            col_order = [
+                "short", "username", "trade_count", "volume_usdc", "realized_pnl",
+                "roi", "win_rate", "sharpe_like", "markets_traded",
+                "avg_trade_size", "max_drawdown", "early_entry_score", "contrarian_score",
+            ]
+            st.dataframe(
+                df[col_order].style.format({
+                    "volume_usdc": "${:,.0f}",
+                    "realized_pnl": "${:+,.0f}",
+                    "roi": "{:+.1%}",
+                    "win_rate": "{:.0%}",
+                    "sharpe_like": "{:.2f}",
+                    "avg_trade_size": "${:,.0f}",
+                    "max_drawdown": "${:,.0f}",
+                    "early_entry_score": "{:.2f}",
+                    "contrarian_score": "{:+.2f}",
+                }),
+                use_container_width=True, hide_index=True, height=520,
+            )
+
+            st.subheader("PnL distribution (analyzer FIFO)")
+            fig = px.histogram(df, x="realized_pnl", nbins=40, title=None)
+            fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0))
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.subheader("ROI vs. volume (bubble = trade count)")
+            fig2 = px.scatter(
+                df, x="volume_usdc", y="roi", size="trade_count",
+                hover_data=["short", "username"], log_x=True,
+            )
+            fig2.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0))
+            st.plotly_chart(fig2, use_container_width=True)
 
 
 # -------------------------------------------------------------- Leaderboard
@@ -367,20 +435,24 @@ elif page == "Wallet":
     meta = _q(db_path, "SELECT * FROM traders WHERE address = ?", (addr,))
     metrics = _q(db_path, "SELECT * FROM trader_metrics WHERE address = ?", (addr,))
 
-    cols = st.columns(4)
-    if not metrics.empty:
+    cols = st.columns(5)
+    if not meta.empty:
+        t = meta.iloc[0]
+        cols[0].metric("Trades", f"{int(t.get('trade_count') or 0):,}")
+        cols[1].metric("Volume (API)", f"${float(t.get('total_volume_usdc') or 0):,.0f}")
+        cols[2].metric("PnL (API)", f"${float(t.get('total_pnl_usdc') or 0):+,.0f}")
+        if not metrics.empty:
+            m = metrics.iloc[0]
+            cols[3].metric("PnL (Analyzer)", f"${m['realized_pnl']:+,.0f}")
+            cols[4].metric("ROI", f"{(m['roi'] or 0)*100:+.1f}%")
+        if t.get("username"):
+            st.caption(f"Known as: {t['username']}")
+    elif not metrics.empty:
         m = metrics.iloc[0]
         cols[0].metric("Trades", f"{int(m['trade_count']):,}")
         cols[1].metric("Volume", f"${m['volume_usdc']:,.0f}")
-        cols[2].metric("Realized PnL", f"${m['realized_pnl']:+,.0f}")
+        cols[2].metric("PnL (Analyzer)", f"${m['realized_pnl']:+,.0f}")
         cols[3].metric("ROI", f"{(m['roi'] or 0)*100:+.1f}%")
-        if not meta.empty and meta.iloc[0]["username"]:
-            st.caption(f"Known as: {meta.iloc[0]['username']}")
-        if m["notes"]:
-            try:
-                st.json(json.loads(m["notes"]))
-            except Exception:
-                st.text(m["notes"])
     else:
         st.info("No analyzer metrics yet for this wallet.")
 

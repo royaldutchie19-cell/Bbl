@@ -589,6 +589,112 @@ def watch_remove(address: str, config: str = typer.Option(None)) -> None:
     db.close()
 
 
+# ---------------------------------------------------------------- doctor
+
+
+@app.command()
+def doctor(
+    config: str = typer.Option(None),
+    as_json: bool = typer.Option(True, "--json/--human",
+                                 help="Dump JSON (easy to paste for support) or human table"),
+) -> None:
+    """Dump a diagnostic snapshot — paste this output when data looks off."""
+    import json as _json
+    import os as _os
+
+    cfg, db = _setup(config)
+    out: dict = {"bbl_env": {}, "counts": {}, "samples": {}, "ranges": {}, "runs": {}}
+
+    for k in ("BBL_MODE", "BBL_COLLECTORS", "BBL_RUN_COLLECTORS",
+              "BBL_BACKFILL_TOP", "BBL_BACKFILL_LIMIT", "BBL_BACKFILL_DAYS",
+              "BBL_POLYGON_RPC"):
+        v = _os.environ.get(k)
+        if v is not None:
+            out["bbl_env"][k] = v if "RPC" not in k else "<set>"
+    out["bbl_env"]["db_path"] = str(cfg.db_path)
+    out["bbl_env"]["db_exists"] = Path(cfg.db_path).exists()
+
+    tables = (
+        "markets", "market_tokens", "events", "tags",
+        "price_snapshots", "price_history", "orderbook_snapshots",
+        "trades", "traders", "leaderboard_snapshots",
+        "positions", "market_holders",
+        "user_value_series", "user_pnl_series", "user_rewards",
+        "trader_metrics", "wallet_links",
+        "funding_transfers", "wallet_funders",
+        "watchlist", "collector_runs",
+    )
+    for tbl in tables:
+        try:
+            out["counts"][tbl] = db.conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+        except Exception as e:
+            out["counts"][tbl] = f"err: {e!s}"
+
+    def _rows(sql: str, params: tuple = ()) -> list:
+        try:
+            return [dict(r) for r in db.conn.execute(sql, params).fetchall()]
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    out["samples"]["traders_by_pnl"] = _rows(
+        "SELECT address, username, total_pnl_usdc, total_volume_usdc, trade_count "
+        "FROM traders ORDER BY total_pnl_usdc DESC NULLS LAST LIMIT 5"
+    )
+    out["samples"]["trader_metrics_by_realized_pnl"] = _rows(
+        "SELECT address, realized_pnl, roi, volume_usdc, trade_count, "
+        "win_rate, markets_traded FROM trader_metrics "
+        "ORDER BY realized_pnl DESC NULLS LAST LIMIT 5"
+    )
+    out["samples"]["latest_leaderboard_profit"] = _rows(
+        "SELECT address, value, rank FROM leaderboard_snapshots "
+        "WHERE metric='profit' AND window='all' "
+        "ORDER BY ts DESC, rank ASC LIMIT 10"
+    )
+    out["samples"]["latest_leaderboard_volume"] = _rows(
+        "SELECT address, value, rank FROM leaderboard_snapshots "
+        "WHERE metric='volume' AND window='all' "
+        "ORDER BY ts DESC, rank ASC LIMIT 5"
+    )
+    out["samples"]["sample_trades"] = _rows(
+        "SELECT trade_id, ts, taker, maker, token_id, side, "
+        "price, size, usdc_size FROM trades ORDER BY ts DESC LIMIT 3"
+    )
+    out["samples"]["wallet_links"] = _rows(
+        "SELECT address_a, address_b, score, reason FROM wallet_links "
+        "ORDER BY score DESC LIMIT 5"
+    )
+
+    tr_range = _rows(
+        "SELECT MIN(ts) AS min_ts, MAX(ts) AS max_ts, "
+        "COUNT(DISTINCT taker) AS takers FROM trades"
+    )
+    out["ranges"]["trades"] = tr_range[0] if tr_range else {}
+    lb_range = _rows(
+        "SELECT MIN(ts) AS min_ts, MAX(ts) AS max_ts, "
+        "COUNT(DISTINCT ts) AS snapshots FROM leaderboard_snapshots"
+    )
+    out["ranges"]["leaderboard"] = lb_range[0] if lb_range else {}
+
+    out["runs"]["per_collector_latest"] = _rows(
+        "SELECT collector, MAX(started_ts) AS last_start, "
+        "COUNT(*) AS runs, "
+        "SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok, "
+        "SUM(CASE WHEN status!='ok' THEN 1 ELSE 0 END) AS errors "
+        "FROM collector_runs GROUP BY collector ORDER BY collector"
+    )
+    out["runs"]["recent_errors"] = _rows(
+        "SELECT collector, started_ts, status, error FROM collector_runs "
+        "WHERE status != 'ok' ORDER BY id DESC LIMIT 5"
+    )
+
+    db.close()
+
+    if as_json:
+        console.print_json(data=out)
+    else:
+        console.print(out)
+
+
 # ---------------------------------------------------------------- status
 
 
