@@ -367,38 +367,49 @@ def onchain_funders(
 @report_app.command("traders")
 def report_traders(
     limit: int = typer.Option(20),
-    sort_by: str = typer.Option("realized_pnl", help="realized_pnl|roi|sharpe_like|win_rate"),
+    sort_by: str = typer.Option("pnl", help="pnl|volume|trade_count|win_rate"),
     config: str = typer.Option(None),
 ) -> None:
     """Top traders with key metrics in one view."""
     cfg, db = _setup(config)
-    valid = {"realized_pnl", "roi", "sharpe_like", "win_rate", "volume_usdc"}
+    valid = {"pnl", "volume", "trade_count", "win_rate"}
     if sort_by not in valid:
         raise typer.BadParameter(f"sort_by must be one of {valid}")
+    sort_col = {
+        "pnl": "COALESCE(t.total_pnl_usdc, 0)",
+        "volume": "COALESCE(t.total_volume_usdc, 0)",
+        "trade_count": "COALESCE(t.trade_count, 0)",
+        "win_rate": "COALESCE(tm.win_rate, 0)",
+    }[sort_by]
     rows = db.conn.execute(
         f"""
-        SELECT tm.*, t.username
-          FROM trader_metrics tm
-          LEFT JOIN traders t ON t.address = tm.address
-         ORDER BY {sort_by} DESC
+        SELECT t.address, t.username,
+               COALESCE(t.total_pnl_usdc, 0) AS pnl,
+               COALESCE(t.total_volume_usdc, 0) AS volume,
+               COALESCE(t.trade_count, 0) AS trade_count,
+               tm.win_rate, tm.markets_traded, tm.early_entry_score
+          FROM traders t
+          LEFT JOIN trader_metrics tm ON tm.address = t.address
+         ORDER BY {sort_col} DESC
          LIMIT ?
         """,
         (limit,),
     ).fetchall()
     table = Table(title=f"Top {limit} traders by {sort_by}")
-    for col in ("addr", "name", "trades", "vol", "pnl", "roi", "win%", "sharpe", "mkts", "early"):
+    for col in ("addr", "name", "trades", "vol", "pnl", "roi", "win%", "mkts", "early"):
         table.add_column(col)
     for r in rows:
+        vol = float(r["volume"] or 0)
+        pnl = float(r["pnl"] or 0)
         table.add_row(
             r["address"][:10] + "…",
             (r["username"] or "")[:14],
             str(r["trade_count"]),
-            f"{r['volume_usdc']:,.0f}",
-            f"{r['realized_pnl']:+,.0f}",
-            f"{(r['roi'] or 0) * 100:+.1f}%",
+            f"{vol:,.0f}",
+            f"{pnl:+,.0f}",
+            f"{(pnl / vol * 100 if vol else 0):+.1f}%",
             f"{(r['win_rate'] or 0) * 100:.0f}%",
-            f"{r['sharpe_like'] or 0:.2f}",
-            str(r["markets_traded"]),
+            str(r["markets_traded"] or 0),
             f"{r['early_entry_score'] or 0:.2f}",
         )
     console.print(table)
@@ -417,12 +428,11 @@ def report_links(
     q = """
         SELECT wl.address_a, wl.address_b, wl.score, wl.reason,
                ta.username AS name_a, tb.username AS name_b,
-               tma.realized_pnl AS pnl_a, tmb.realized_pnl AS pnl_b
+               COALESCE(ta.total_pnl_usdc, 0) AS pnl_a,
+               COALESCE(tb.total_pnl_usdc, 0) AS pnl_b
           FROM wallet_links wl
           LEFT JOIN traders ta ON ta.address = wl.address_a
           LEFT JOIN traders tb ON tb.address = wl.address_b
-          LEFT JOIN trader_metrics tma ON tma.address = wl.address_a
-          LEFT JOIN trader_metrics tmb ON tmb.address = wl.address_b
          WHERE wl.score >= ?
     """
     params: list = [min_score]
@@ -456,22 +466,33 @@ def report_wallet(
     """Detailed view for a single wallet."""
     cfg, db = _setup(config)
     addr = address.lower()
+    t = db.conn.execute(
+        "SELECT * FROM traders WHERE address=?", (addr,)
+    ).fetchone()
     m = db.conn.execute(
         "SELECT * FROM trader_metrics WHERE address=?", (addr,)
     ).fetchone()
-    if not m:
-        console.print(f"[yellow]no metrics for {addr} — run analyze first[/yellow]")
+    if not t and not m:
+        console.print(f"[yellow]no data for {addr}[/yellow]")
         db.close()
         return
     console.print(f"[bold]{addr}[/bold]")
-    console.print(
-        f"  trades={m['trade_count']}  volume=${m['volume_usdc']:,.0f}  "
-        f"pnl=${m['realized_pnl']:+,.0f}  roi={(m['roi'] or 0)*100:+.1f}%  "
-        f"win_rate={(m['win_rate'] or 0)*100:.0f}%  sharpe={m['sharpe_like'] or 0:.2f}"
-    )
-    notes = m["notes"]
-    if notes:
-        console.print(f"  patterns: {notes}")
+    if t:
+        pnl = float(t["total_pnl_usdc"] or 0)
+        vol = float(t["total_volume_usdc"] or 0)
+        console.print(
+            f"  trades={t['trade_count'] or 0}  volume=${vol:,.0f}  "
+            f"pnl=${pnl:+,.0f}  roi={(pnl / vol * 100 if vol else 0):+.1f}%"
+        )
+    if m:
+        console.print(
+            f"  win_rate={(m['win_rate'] or 0)*100:.0f}%  "
+            f"early_entry={m['early_entry_score'] or 0:.2f}  "
+            f"markets={m['markets_traded'] or 0}"
+        )
+        notes = m["notes"]
+        if notes:
+            console.print(f"  patterns: {notes}")
     links = db.conn.execute(
         """
         SELECT address_b AS other, score, reason FROM wallet_links WHERE address_a=?
@@ -640,10 +661,12 @@ def doctor(
         "SELECT address, username, total_pnl_usdc, total_volume_usdc, trade_count "
         "FROM traders ORDER BY total_pnl_usdc DESC NULLS LAST LIMIT 5"
     )
-    out["samples"]["trader_metrics_by_realized_pnl"] = _rows(
-        "SELECT address, realized_pnl, roi, volume_usdc, trade_count, "
-        "win_rate, markets_traded FROM trader_metrics "
-        "ORDER BY realized_pnl DESC NULLS LAST LIMIT 5"
+    out["samples"]["trader_metrics_top"] = _rows(
+        "SELECT tm.address, tm.win_rate, tm.volume_usdc, tm.trade_count, "
+        "tm.markets_traded, tm.early_entry_score, "
+        "COALESCE(t.total_pnl_usdc, 0) AS api_pnl "
+        "FROM trader_metrics tm LEFT JOIN traders t ON t.address = tm.address "
+        "ORDER BY api_pnl DESC LIMIT 5"
     )
     out["samples"]["latest_leaderboard_profit"] = _rows(
         "SELECT address, value, rank FROM leaderboard_snapshots "

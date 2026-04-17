@@ -53,9 +53,9 @@ def find_wallet_links(cfg: Config, db: Database) -> int:
         r["address"]
         for r in db.conn.execute(
             """
-            SELECT address FROM trader_metrics
-             WHERE realized_pnl > 0
-             ORDER BY realized_pnl DESC
+            SELECT t.address FROM traders t
+             WHERE COALESCE(t.total_pnl_usdc, 0) > 0
+             ORDER BY t.total_pnl_usdc DESC
              LIMIT 500
             """
         )

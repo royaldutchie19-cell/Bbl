@@ -39,7 +39,9 @@ class TraderPatterns:
 def detect_patterns(cfg: Config, db: Database) -> int:
     """Walk trader_metrics and attach pattern annotations."""
     rows = db.conn.execute(
-        "SELECT address FROM trader_metrics ORDER BY realized_pnl DESC"
+        "SELECT tm.address FROM trader_metrics tm "
+        "LEFT JOIN traders t ON t.address = tm.address "
+        "ORDER BY COALESCE(t.total_pnl_usdc, 0) DESC"
     ).fetchall()
     updated = 0
     for r in rows:

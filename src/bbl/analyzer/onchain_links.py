@@ -193,7 +193,7 @@ def _wallets_to_scan(db: Database, *, limit: int) -> list[str]:
     addrs: list[str] = []
     seen: set[str] = set()
     for r in db.conn.execute(
-        "SELECT address FROM trader_metrics ORDER BY realized_pnl DESC LIMIT ?",
+        "SELECT address FROM traders ORDER BY COALESCE(total_pnl_usdc, 0) DESC LIMIT ?",
         (limit,),
     ):
         a = r["address"]

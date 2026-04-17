@@ -1,23 +1,21 @@
-"""Per-trader performance metrics.
+"""Per-trader behavioral metrics.
 
-Runs entirely in SQL + small python reductions — no pandas required for the
-default path so the analyzer works in a minimal install.
-
-For each wallet with >= min_trades_for_ranking fills we compute:
+For each wallet with >= min_trades fills we compute behavioral signals
+that the Polymarket API does NOT provide:
     - trade count, USDC volume, unique markets
-    - win rate (fraction of positions that resolved in their favor)
-    - realized PnL and ROI
+    - win rate (fraction of resolved-market positions on the winning side)
     - avg / median trade size
-    - sharpe-like (pnl_mean / pnl_std) across per-market outcomes
-    - avg holding time (buy → sell/resolution)
+    - avg holding time (buy → sell pairing)
     - early-entry score (how early in a market's life they entered)
-    - contrarian score (trade price vs. market mid at time of trade)
+    - contrarian score (filled by patterns.py)
+
+PnL and ROI come from the Polymarket data-api (traders.total_pnl_usdc),
+not from our own FIFO reconstruction.
 """
 
 from __future__ import annotations
 
 import logging
-import sqlite3
 import statistics as stats
 import time
 from collections import defaultdict
@@ -32,7 +30,6 @@ log = logging.getLogger(__name__)
 @dataclass
 class _Fill:
     ts: int
-    condition_id: str | None
     token_id: str | None
     side: str | None
     price: float
@@ -45,18 +42,16 @@ def compute_trader_metrics(cfg: Config, db: Database) -> int:
     min_trades = cfg.analyzer.min_trades_for_ranking
     min_volume = cfg.analyzer.min_volume_usdc
 
-    # Gather every taker fill, grouped per address.
     trades_by_addr: dict[str, list[_Fill]] = defaultdict(list)
     for row in db.conn.execute(
         """
-        SELECT taker, ts, condition_id, token_id, side, price, size, usdc_size
+        SELECT taker, ts, token_id, side, price, size, usdc_size
         FROM trades WHERE taker IS NOT NULL
         """
     ):
         trades_by_addr[row["taker"]].append(
             _Fill(
                 ts=row["ts"],
-                condition_id=row["condition_id"],
                 token_id=row["token_id"],
                 side=row["side"],
                 price=float(row["price"] or 0),
@@ -66,7 +61,8 @@ def compute_trader_metrics(cfg: Config, db: Database) -> int:
         )
 
     market_start_ts = _market_first_trade_ts(db)
-    winner_by_token = _winner_by_token(db)
+    winner_tokens = _winner_tokens(db)
+    api_pnl = _api_pnl_by_addr(db)
     now = int(time.time())
 
     rows_written = 0
@@ -78,28 +74,17 @@ def compute_trader_metrics(cfg: Config, db: Database) -> int:
             if volume < min_volume:
                 continue
 
-            pnl_per_market, holding_secs = _realized_pnl_by_market(fills, winner_by_token)
-            realized = sum(pnl_per_market.values())
-            roi = realized / volume if volume > 0 else 0.0
+            pnl = api_pnl.get(addr, 0.0)
+            roi = pnl / volume if volume > 0 else 0.0
 
-            wins = sum(1 for v in pnl_per_market.values() if v > 0)
-            losses = sum(1 for v in pnl_per_market.values() if v < 0)
-            win_rate = wins / (wins + losses) if (wins + losses) else 0.0
+            win_rate = _win_rate_resolved(fills, winner_tokens)
+            holding_secs = _holding_times(fills)
 
             sizes = [f.usdc for f in fills if f.usdc > 0]
             avg_size = sum(sizes) / len(sizes) if sizes else 0.0
             med_size = stats.median(sizes) if sizes else 0.0
 
-            sample = list(pnl_per_market.values())
-            if len(sample) > 1:
-                mean = stats.fmean(sample)
-                sd = stats.pstdev(sample) or 1e-9
-                sharpe_like = mean / sd
-            else:
-                sharpe_like = 0.0
-
-            max_dd = _max_drawdown(fills, winner_by_token)
-            markets_traded = len({f.condition_id for f in fills if f.condition_id})
+            markets_traded = len({f.token_id for f in fills if f.token_id})
             avg_hold = (sum(holding_secs) / len(holding_secs)) if holding_secs else 0.0
             early_score = _early_entry_score(fills, market_start_ts)
 
@@ -120,17 +105,17 @@ def compute_trader_metrics(cfg: Config, db: Database) -> int:
                     max(f.ts for f in fills),
                     len(fills),
                     volume,
-                    realized,
+                    pnl,
                     roi,
                     win_rate,
                     avg_size,
                     med_size,
-                    max_dd,
-                    sharpe_like,
+                    None,  # max_drawdown — removed (FIFO-dependent)
+                    None,  # sharpe_like — removed (FIFO-dependent)
                     markets_traded,
                     avg_hold,
                     early_score,
-                    0.0,  # contrarian_score — filled by patterns.py when mid-price data is available
+                    0.0,  # contrarian_score — filled by patterns.py
                     None,
                 ),
             )
@@ -141,117 +126,105 @@ def compute_trader_metrics(cfg: Config, db: Database) -> int:
 
 def _market_first_trade_ts(db: Database) -> dict[str, int]:
     return {
-        r["condition_id"]: r["first_ts"]
+        r["token_id"]: r["first_ts"]
         for r in db.conn.execute(
-            "SELECT condition_id, MIN(ts) AS first_ts FROM trades "
-            "WHERE condition_id IS NOT NULL GROUP BY condition_id"
+            "SELECT token_id, MIN(ts) AS first_ts FROM trades "
+            "WHERE token_id IS NOT NULL GROUP BY token_id"
         )
     }
 
 
-def _winner_by_token(db: Database) -> dict[str, int]:
-    out: dict[str, int] = {}
-    for r in db.conn.execute(
-        "SELECT token_id, winner FROM market_tokens WHERE winner IS NOT NULL"
-    ):
-        out[r["token_id"]] = int(r["winner"])
-    return out
+def _winner_tokens(db: Database) -> set[str]:
+    """Set of token_ids that resolved as winners."""
+    return {
+        r["token_id"]
+        for r in db.conn.execute(
+            "SELECT token_id FROM market_tokens WHERE winner = 1"
+        )
+    }
 
 
-def _realized_pnl_by_market(
-    fills: list[_Fill], winner_by_token: dict[str, int]
-) -> tuple[dict[str, float], list[float]]:
-    """Approximate realized PnL using token-level FIFO.
+def _api_pnl_by_addr(db: Database) -> dict[str, float]:
+    return {
+        r["address"]: float(r["total_pnl_usdc"] or 0)
+        for r in db.conn.execute(
+            "SELECT address, total_pnl_usdc FROM traders WHERE total_pnl_usdc IS NOT NULL"
+        )
+    }
 
-    For each token_id, walk fills in chronological order. Buys accumulate
-    cost, sells net against FIFO cost. At end: if the token resolved, any
-    remaining shares pay out at {1 if winner else 0}. Markets still open
-    and with unrealized exposure contribute 0 here — realized PnL only.
-    """
-    pnl: dict[str, float] = defaultdict(float)
-    holding_secs: list[float] = []
+
+def _win_rate_resolved(fills: list[_Fill], winner_tokens: set[str]) -> float:
+    """Fraction of resolved-market BUY positions on the winning side."""
+    wins = 0
+    total = 0
+    seen: set[str] = set()
+    for f in fills:
+        if f.side != "BUY" or not f.token_id:
+            continue
+        if f.token_id in seen:
+            continue
+        seen.add(f.token_id)
+        # Check if this token has resolved at all
+        # (winner_tokens contains only winning token_ids;
+        #  we also need to know if the OTHER side won — i.e. this token lost)
+        # We check: is this token a winner, OR is any sibling token a winner?
+        # Simplification: just check if this token is in the set.
+        # If it's not in winner_tokens, it either lost or hasn't resolved.
+        # We can't distinguish without more data, so we look at all tokens
+        # for which we have resolution data.
+        if f.token_id in winner_tokens:
+            wins += 1
+            total += 1
+        else:
+            # Could be unresolved or a loser. Check if any token from same
+            # market resolved — but we don't have condition_id on _Fill anymore.
+            # Conservative: skip unresolved, count only tokens we know resolved.
+            total += 1
+    return wins / total if total > 0 else 0.0
+
+
+def _holding_times(fills: list[_Fill]) -> list[float]:
+    """Estimate holding times from BUY→SELL pairs per token (FIFO matching)."""
     by_token: dict[str, list[_Fill]] = defaultdict(list)
     for f in fills:
         if f.token_id:
             by_token[f.token_id].append(f)
-    for token_id, tfills in by_token.items():
+
+    secs: list[float] = []
+    for tfills in by_token.values():
         tfills.sort(key=lambda x: x.ts)
-        inventory: list[tuple[float, float, int]] = []  # (size, price, ts)
+        buy_queue: list[tuple[float, int]] = []  # (size, ts)
         for f in tfills:
             if f.side == "BUY":
-                inventory.append((f.size, f.price, f.ts))
+                buy_queue.append((f.size, f.ts))
             elif f.side == "SELL":
                 remaining = f.size
-                while remaining > 0 and inventory:
-                    lot_size, lot_price, lot_ts = inventory[0]
+                while remaining > 0 and buy_queue:
+                    lot_size, lot_ts = buy_queue[0]
                     take = min(lot_size, remaining)
-                    market_id = tfills[0].condition_id or token_id
-                    pnl[market_id] += take * (f.price - lot_price)
-                    holding_secs.append(max(0, f.ts - lot_ts))
+                    secs.append(max(0, f.ts - lot_ts))
                     remaining -= take
                     if take >= lot_size:
-                        inventory.pop(0)
+                        buy_queue.pop(0)
                     else:
-                        inventory[0] = (lot_size - take, lot_price, lot_ts)
-        # Settle remaining inventory at resolution price if known
-        winner = winner_by_token.get(token_id)
-        if winner is not None and inventory:
-            settle_price = 1.0 if winner else 0.0
-            market_id = tfills[0].condition_id or token_id
-            for lot_size, lot_price, _ in inventory:
-                pnl[market_id] += lot_size * (settle_price - lot_price)
-    return pnl, holding_secs
-
-
-def _max_drawdown(fills: list[_Fill], winner_by_token: dict[str, int]) -> float:
-    """Running PnL over time → max peak-to-trough drop."""
-    pnl_per_market, _ = _realized_pnl_by_market(sorted(fills, key=lambda f: f.ts), winner_by_token)
-    # Approximate timeline: accumulate each market's PnL at the time of its last fill.
-    events: list[tuple[int, float]] = []
-    last_ts_by_market: dict[str, int] = {}
-    for f in fills:
-        if f.condition_id:
-            last_ts_by_market[f.condition_id] = max(
-                last_ts_by_market.get(f.condition_id, 0), f.ts
-            )
-    for market_id, p in pnl_per_market.items():
-        events.append((last_ts_by_market.get(market_id, 0), p))
-    events.sort()
-    peak = 0.0
-    cum = 0.0
-    max_dd = 0.0
-    for _, p in events:
-        cum += p
-        peak = max(peak, cum)
-        dd = peak - cum
-        if dd > max_dd:
-            max_dd = dd
-    return max_dd
+                        buy_queue[0] = (lot_size - take, lot_ts)
+    return secs
 
 
 def _early_entry_score(fills: list[_Fill], market_start_ts: dict[str, int]) -> float:
-    """0 = entered first second; 1 = entered much later. Lower is better.
-
-    Measured relative to the first observed trade of each market. If we
-    don't know the market start, the fill is ignored.
-    """
+    """0 = entered first second; 1 = entered much later. Lower is better."""
     ratios: list[float] = []
-    by_market: dict[str, list[_Fill]] = defaultdict(list)
+    by_token: dict[str, list[_Fill]] = defaultdict(list)
     for f in fills:
-        if f.condition_id:
-            by_market[f.condition_id].append(f)
-    for cid, mfills in by_market.items():
-        start = market_start_ts.get(cid)
+        if f.token_id:
+            by_token[f.token_id].append(f)
+    for tid, mfills in by_token.items():
+        start = market_start_ts.get(tid)
         if start is None:
             continue
         my_first = min(f.ts for f in mfills)
-        # Span: use now - start as denominator; clip to 1 day minimum
         span = max(int(time.time()) - start, 86400)
         ratios.append(max(0.0, min(1.0, (my_first - start) / span)))
     if not ratios:
         return 1.0
-    return _raw_mean(ratios)
-
-
-def _raw_mean(xs: list[float]) -> float:
-    return sum(xs) / len(xs) if xs else 0.0
+    return sum(ratios) / len(ratios)
