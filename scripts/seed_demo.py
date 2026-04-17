@@ -17,9 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bbl.analyzer import (
     build_funding_links,
+    classify_traders,
     compute_trader_metrics,
     detect_patterns,
+    detect_smart_money_signals,
     find_wallet_links,
+    score_markets,
 )
 from bbl.analyzer.onchain_links import _refresh_wallet_funders
 from bbl.config import Config
@@ -231,9 +234,12 @@ db.conn.execute(
     (addresses[1], "degen_master", now, 0.5),
 )
 
-# Run analyzer
+# Run analyzer pipeline
 print("compute_trader_metrics:", compute_trader_metrics(cfg, db))
 print("detect_patterns:", detect_patterns(cfg, db))
+print("classify_traders:", classify_traders(cfg, db))
+print("detect_smart_money_signals:", detect_smart_money_signals(cfg, db))
+print("score_markets:", score_markets(cfg, db))
 print("find_wallet_links:", find_wallet_links(cfg, db))
 print("build_funding_links:", build_funding_links(cfg, db))
 
@@ -250,7 +256,8 @@ for coll in ("markets", "leaderboard", "trades", "prices", "resolutions"):
 print("\nSeed complete. Tables:")
 for tbl in ("markets", "trades", "traders", "leaderboard_snapshots",
             "trader_metrics", "wallet_links", "funding_transfers",
-            "price_history", "wallet_funders"):
+            "price_history", "wallet_funders",
+            "smart_money_signals", "market_scores"):
     n = db.conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
     print(f"  {tbl}: {n}")
 

@@ -25,10 +25,13 @@ from rich.table import Table
 
 from bbl.analyzer import (
     build_funding_links,
+    classify_traders,
     compute_trader_metrics,
     detect_patterns,
+    detect_smart_money_signals,
     fetch_funding_for_top_wallets,
     find_wallet_links,
+    score_markets,
 )
 from bbl.backfill import backfill_top_traders, backfill_wallet
 from bbl.collectors import ALL_COLLECTORS
@@ -204,6 +207,30 @@ def analyze_links(config: str = typer.Option(None)) -> None:
     db.close()
 
 
+@analyze_app.command("smart-money")
+def analyze_smart_money(config: str = typer.Option(None)) -> None:
+    cfg, db = _setup(config)
+    n = detect_smart_money_signals(cfg, db)
+    console.print(f"[green]smart_money_signals[/green]: {n} signals")
+    db.close()
+
+
+@analyze_app.command("scores")
+def analyze_scores(config: str = typer.Option(None)) -> None:
+    cfg, db = _setup(config)
+    n = score_markets(cfg, db)
+    console.print(f"[green]market_scores[/green]: {n} markets scored")
+    db.close()
+
+
+@analyze_app.command("taxonomy")
+def analyze_taxonomy(config: str = typer.Option(None)) -> None:
+    cfg, db = _setup(config)
+    n = classify_traders(cfg, db)
+    console.print(f"[green]taxonomy[/green]: {n} traders classified")
+    db.close()
+
+
 @analyze_app.command("all")
 def analyze_all(
     include_funding: bool = typer.Option(False, help="Also fold funding-graph links into wallet_links"),
@@ -214,8 +241,12 @@ def analyze_all(
     b = detect_patterns(cfg, db)
     c = find_wallet_links(cfg, db)
     d = build_funding_links(cfg, db) if include_funding else 0
+    e = classify_traders(cfg, db)
+    f = detect_smart_money_signals(cfg, db)
+    g = score_markets(cfg, db)
     console.print(
-        f"[green]done[/green] — metrics:{a} patterns:{b} links:{c} funding:{d}"
+        f"[green]done[/green] — metrics:{a} patterns:{b} links:{c} funding:{d} "
+        f"taxonomy:{e} signals:{f} market_scores:{g}"
     )
     db.close()
 

@@ -318,3 +318,40 @@ CREATE TABLE IF NOT EXISTS collector_runs (
     error        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_collector ON collector_runs(collector, started_ts);
+
+-- --------------------------------------------------------- smart money
+
+-- Smart money convergence signals: when N+ top wallets enter the same
+-- market within a short window, that's a signal worth tracking.
+CREATE TABLE IF NOT EXISTS smart_money_signals (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts             INTEGER NOT NULL,            -- when the signal was generated
+    condition_id   TEXT NOT NULL,
+    token_id       TEXT,
+    direction      TEXT NOT NULL,               -- bullish / bearish
+    signal_strength REAL NOT NULL,              -- 0..1
+    trader_count   INTEGER NOT NULL,            -- how many smart wallets
+    total_usdc     REAL,                        -- combined USDC in the move
+    avg_entry_price REAL,
+    traders_json   TEXT,                        -- JSON list of {address, usdc, price}
+    note           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sm_signals_ts   ON smart_money_signals(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_sm_signals_cond ON smart_money_signals(condition_id, ts);
+
+-- --------------------------------------------------------- market scores
+
+-- Composite market score, recomputed periodically by the analyzer.
+CREATE TABLE IF NOT EXISTS market_scores (
+    condition_id       TEXT PRIMARY KEY,
+    computed_ts        INTEGER NOT NULL,
+    volume_24h         REAL,
+    volume_velocity    REAL,                    -- 24h vol / 7d avg daily vol
+    smart_money_flow   REAL,                    -- net smart money USDC (pos=bullish)
+    trader_influx      REAL,                    -- new unique traders in 24h
+    spread_quality     REAL,                    -- 0..1, 1 = tightest
+    holder_concentration REAL,                  -- gini of top holders
+    composite_score    REAL,                    -- weighted combination, 0..1
+    breakdown_json     TEXT                     -- per-dimension detail
+);
+CREATE INDEX IF NOT EXISTS idx_market_scores ON market_scores(composite_score DESC);

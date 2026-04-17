@@ -69,6 +69,8 @@ if not Path(db_path).exists():
 PAGES = [
     "Overview",
     "Traders",
+    "Smart Money",
+    "Market Scores",
     "Leaderboard",
     "Markets",
     "Wallet",
@@ -91,11 +93,11 @@ if page == "Overview":
 
     tables = [
         ("markets", "Markets"),
-        ("events", "Events"),
         ("trades", "Trades"),
         ("traders", "Traders"),
-        ("price_history", "Candles"),
         ("trader_metrics", "Analyzed"),
+        ("smart_money_signals", "SM signals"),
+        ("market_scores", "Scored mkts"),
         ("wallet_links", "Links"),
         ("funding_transfers", "Funding txs"),
     ]
@@ -199,7 +201,10 @@ elif page == "Traders":
                COALESCE(t.trade_count, 0) AS trade_count,
                tm.win_rate, tm.markets_traded,
                tm.avg_trade_size, tm.avg_holding_secs,
-               tm.early_entry_score, tm.contrarian_score
+               tm.early_entry_score, tm.contrarian_score,
+               tm.max_drawdown AS avg_clv,
+               tm.sharpe_like AS clv_pos_rate,
+               tm.notes AS taxonomy_json
           FROM traders t
           LEFT JOIN trader_metrics tm ON tm.address = t.address
          WHERE COALESCE(t.trade_count, 0) >= ?
@@ -214,16 +219,30 @@ elif page == "Traders":
         df["short"] = df["address"].apply(_fmt_addr)
         if "avg_holding_secs" in df.columns:
             df["avg_hold_h"] = (df["avg_holding_secs"].fillna(0) / 3600).round(1)
+        if "taxonomy_json" in df.columns:
+            import json as _json
+            def _parse_tax(raw):
+                try:
+                    return _json.loads(raw) if raw else {}
+                except Exception:
+                    return {}
+            tax = df["taxonomy_json"].apply(_parse_tax)
+            df["archetype"] = tax.apply(lambda d: d.get("archetype", ""))
+            df["tier"] = tax.apply(lambda d: d.get("tier", ""))
+            df["copyability"] = tax.apply(lambda d: d.get("copyability"))
         col_order = [
-            "short", "username", "pnl", "volume", "trade_count",
-            "win_rate", "markets_traded",
-            "avg_trade_size", "avg_hold_h", "early_entry_score", "contrarian_score",
+            "short", "username", "archetype", "tier", "pnl", "volume", "trade_count",
+            "win_rate", "avg_clv", "clv_pos_rate", "copyability",
+            "markets_traded", "early_entry_score",
         ]
         present = [c for c in col_order if c in df.columns]
         fmt = {
             "pnl": "${:+,.0f}", "volume": "${:,.0f}",
             "avg_trade_size": "${:,.0f}",
             "win_rate": "{:.0%}",
+            "avg_clv": "{:+.3f}",
+            "clv_pos_rate": "{:.0%}",
+            "copyability": "{:.2f}",
             "early_entry_score": "{:.2f}",
             "contrarian_score": "{:+.2f}",
         }
@@ -249,6 +268,124 @@ elif page == "Traders":
         )
         fig2.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0))
         st.plotly_chart(fig2, use_container_width=True)
+
+
+# -------------------------------------------------------------- Smart Money
+
+elif page == "Smart Money":
+    st.title("Smart money signals")
+    st.caption("Detected when multiple profitable wallets enter the same market within a short window.")
+
+    c1, c2 = st.columns(2)
+    min_strength = c1.slider("Min signal strength", 0.0, 1.0, 0.2, 0.05)
+    limit = c2.number_input("Rows", 10, 500, 50, 10)
+
+    df = _q(
+        db_path,
+        """
+        SELECT sm.ts, m.question, sm.direction, sm.signal_strength,
+               sm.trader_count, sm.total_usdc, sm.avg_entry_price, sm.note,
+               sm.traders_json
+          FROM smart_money_signals sm
+          LEFT JOIN market_tokens mt ON mt.token_id = sm.token_id
+          LEFT JOIN markets m ON m.condition_id = sm.condition_id
+         WHERE sm.signal_strength >= ?
+         ORDER BY sm.ts DESC
+         LIMIT ?
+        """,
+        (float(min_strength), int(limit)),
+    )
+    if df.empty:
+        st.info("No smart money signals yet — run `bbl analyze smart-money`.")
+    else:
+        df["time"] = df["ts"].apply(_human_ts)
+        df["question"] = df["question"].fillna("").str.slice(0, 60)
+        st.dataframe(
+            df[["time", "question", "direction", "note", "signal_strength",
+                "trader_count", "total_usdc", "avg_entry_price"]]
+            .style.format({
+                "signal_strength": "{:.2f}",
+                "total_usdc": "${:,.0f}",
+                "avg_entry_price": "{:.3f}",
+            }),
+            use_container_width=True, hide_index=True, height=480,
+        )
+
+        st.subheader("Signal strength distribution")
+        fig = px.histogram(df, x="signal_strength", nbins=20, color="direction",
+                           color_discrete_map={"bullish": "#00cc96", "bearish": "#ef553b"})
+        fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0))
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("Signals over time")
+        df["dt"] = pd.to_datetime(df["ts"], unit="s", utc=True)
+        fig2 = px.scatter(df, x="dt", y="signal_strength", color="direction",
+                          size="total_usdc", hover_data=["question", "trader_count"],
+                          color_discrete_map={"bullish": "#00cc96", "bearish": "#ef553b"})
+        fig2.update_layout(height=350, margin=dict(l=0, r=0, t=10, b=0))
+        st.plotly_chart(fig2, use_container_width=True)
+
+        if st.checkbox("Show trader details for top signals"):
+            for _, r in df.head(5).iterrows():
+                st.markdown(f"**{r['question']}** — {r['direction']} ({r['note']}), "
+                            f"strength {r['signal_strength']:.2f}, {r['trader_count']} wallets")
+                try:
+                    traders = json.loads(r["traders_json"] or "[]")
+                    for tr in traders[:10]:
+                        st.text(f"  {tr['address'][:12]}… — ${tr['usdc']:,.0f} @ {tr['price']:.3f}")
+                except Exception:
+                    pass
+
+
+# ----------------------------------------------------------- Market Scores
+
+elif page == "Market Scores":
+    st.title("Market scoring")
+    st.caption("Composite score per market — higher = more interesting for copy-trading.")
+
+    df = _q(
+        db_path,
+        """
+        SELECT ms.condition_id, m.question, m.category,
+               ms.composite_score, ms.volume_24h, ms.volume_velocity,
+               ms.smart_money_flow, ms.trader_influx,
+               ms.spread_quality, ms.holder_concentration
+          FROM market_scores ms
+          JOIN markets m ON m.condition_id = ms.condition_id
+         ORDER BY ms.composite_score DESC
+         LIMIT 100
+        """,
+    )
+    if df.empty:
+        st.info("No market scores yet — run `bbl analyze scores`.")
+    else:
+        df["question"] = df["question"].fillna("").str.slice(0, 70)
+        st.dataframe(
+            df[["question", "category", "composite_score", "volume_24h",
+                "volume_velocity", "smart_money_flow", "trader_influx",
+                "spread_quality"]]
+            .style.format({
+                "composite_score": "{:.3f}",
+                "volume_24h": "${:,.0f}",
+                "volume_velocity": "{:.1f}x",
+                "smart_money_flow": "${:+,.0f}",
+                "trader_influx": "{:.0f}",
+                "spread_quality": "{:.2f}",
+            })
+            .background_gradient(subset=["composite_score"], cmap="YlOrRd"),
+            use_container_width=True, hide_index=True, height=520,
+        )
+
+        st.subheader("Score dimensions breakdown")
+        dims = ["volume_velocity", "smart_money_flow", "trader_influx",
+                "spread_quality", "holder_concentration"]
+        fig = px.bar(
+            df.head(15).melt(id_vars=["question"], value_vars=dims),
+            x="question", y="value", color="variable", barmode="group",
+        )
+        fig.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0),
+                          xaxis_tickangle=-45)
+        st.plotly_chart(fig, use_container_width=True)
 
 
 # -------------------------------------------------------------- Leaderboard

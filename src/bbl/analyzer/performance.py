@@ -62,6 +62,7 @@ def compute_trader_metrics(cfg: Config, db: Database) -> int:
 
     market_start_ts = _market_first_trade_ts(db)
     winner_tokens = _winner_tokens(db)
+    loser_tokens = _loser_tokens(db)
     api_pnl = _api_pnl_by_addr(db)
     now = int(time.time())
 
@@ -79,6 +80,7 @@ def compute_trader_metrics(cfg: Config, db: Database) -> int:
 
             win_rate = _win_rate_resolved(fills, winner_tokens)
             holding_secs = _holding_times(fills)
+            avg_clv, clv_pos_rate = _clv(fills, winner_tokens, loser_tokens)
 
             sizes = [f.usdc for f in fills if f.usdc > 0]
             avg_size = sum(sizes) / len(sizes) if sizes else 0.0
@@ -110,8 +112,8 @@ def compute_trader_metrics(cfg: Config, db: Database) -> int:
                     win_rate,
                     avg_size,
                     med_size,
-                    None,  # max_drawdown — removed (FIFO-dependent)
-                    None,  # sharpe_like — removed (FIFO-dependent)
+                    avg_clv,         # repurpose max_drawdown column for avg_clv
+                    clv_pos_rate,    # repurpose sharpe_like column for clv_positive_rate
                     markets_traded,
                     avg_hold,
                     early_score,
@@ -153,6 +155,16 @@ def _api_pnl_by_addr(db: Database) -> dict[str, float]:
     }
 
 
+def _loser_tokens(db: Database) -> set[str]:
+    """Set of token_ids that resolved as losers."""
+    return {
+        r["token_id"]
+        for r in db.conn.execute(
+            "SELECT token_id FROM market_tokens WHERE winner = 0"
+        )
+    }
+
+
 def _win_rate_resolved(fills: list[_Fill], winner_tokens: set[str]) -> float:
     """Fraction of resolved-market BUY positions on the winning side."""
     wins = 0
@@ -164,23 +176,38 @@ def _win_rate_resolved(fills: list[_Fill], winner_tokens: set[str]) -> float:
         if f.token_id in seen:
             continue
         seen.add(f.token_id)
-        # Check if this token has resolved at all
-        # (winner_tokens contains only winning token_ids;
-        #  we also need to know if the OTHER side won — i.e. this token lost)
-        # We check: is this token a winner, OR is any sibling token a winner?
-        # Simplification: just check if this token is in the set.
-        # If it's not in winner_tokens, it either lost or hasn't resolved.
-        # We can't distinguish without more data, so we look at all tokens
-        # for which we have resolution data.
         if f.token_id in winner_tokens:
             wins += 1
             total += 1
         else:
-            # Could be unresolved or a loser. Check if any token from same
-            # market resolved — but we don't have condition_id on _Fill anymore.
-            # Conservative: skip unresolved, count only tokens we know resolved.
             total += 1
     return wins / total if total > 0 else 0.0
+
+
+def _clv(fills: list[_Fill], winner_tokens: set[str],
+         loser_tokens: set[str]) -> tuple[float | None, float | None]:
+    """Closing Line Value — how good were the entry prices vs. resolution.
+
+    For BUY on a winner token: CLV = 1 - entry_price  (positive = good)
+    For BUY on a loser token:  CLV = 0 - entry_price  (negative = bad)
+    Unresolved tokens are skipped.
+
+    Returns (avg_clv, clv_positive_rate).
+    """
+    resolved = winner_tokens | loser_tokens
+    clvs: list[float] = []
+    for f in fills:
+        if f.side != "BUY" or not f.token_id or f.token_id not in resolved:
+            continue
+        if f.price <= 0:
+            continue
+        settle = 1.0 if f.token_id in winner_tokens else 0.0
+        clvs.append(settle - f.price)
+    if not clvs:
+        return None, None
+    avg = sum(clvs) / len(clvs)
+    pos_rate = sum(1 for c in clvs if c > 0) / len(clvs)
+    return round(avg, 6), round(pos_rate, 4)
 
 
 def _holding_times(fills: list[_Fill]) -> list[float]:
