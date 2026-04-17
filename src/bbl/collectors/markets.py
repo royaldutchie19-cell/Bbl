@@ -4,9 +4,9 @@ Gamma has the rich metadata (question, category, event). CLOB has the
 canonical tokens, min tick size, and the authoritative active/closed flags.
 We merge both per market.
 
-We deliberately fetch *both* active and recently-closed markets, because
-the analyzer needs resolved markets (with winner flags on tokens) to
-settle PnL.
+Active markets are fetched in full. Closed markets are capped at 2000
+(sorted by volume) to avoid paginating through 160k+ historical markets
+on the first tick. The resolutions collector handles deeper backfill.
 """
 
 from __future__ import annotations
@@ -24,15 +24,15 @@ class MarketsCollector(BaseCollector):
 
     async def tick(self) -> CollectorResult:
         async with GammaClient(self.cfg.api) as gamma:
-            active = await gamma.iter_markets(active=True, closed=False, archived=False)
-            # Recently closed — needed so winner flags propagate. We don't
-            # need *all* historical closed markets every tick; the
-            # resolutions collector handles deeper backfill.
+            active = await gamma.iter_markets(
+                active=True, closed=False, archived=False,
+            )
             closed = await gamma.iter_markets(
-                active=None, closed=True, archived=False, page_size=500
+                active=None, closed=True, archived=False,
+                max_rows=2000,
             )
         async with ClobClient(self.cfg.api) as clob:
-            clob_rows = await clob.iter_markets()
+            clob_rows = await clob.iter_markets(max_pages=50)
 
         by_cond: dict[str, dict] = {}
         for m in (*active, *closed):

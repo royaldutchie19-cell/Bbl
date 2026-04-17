@@ -17,7 +17,7 @@ class EventsCollector(BaseCollector):
     async def tick(self) -> CollectorResult:
         async with GammaClient(self.cfg.api) as gamma:
             active = await gamma.iter_events(active=True)
-            closed = await gamma.iter_events(active=False, closed=True)
+            closed = await gamma.iter_events(active=False, closed=True, max_rows=2000)
             try:
                 tags = await gamma.list_tags(limit=500)
             except Exception:

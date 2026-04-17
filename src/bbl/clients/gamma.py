@@ -59,8 +59,9 @@ class GammaClient(BaseClient):
         return data if isinstance(data, list) else data.get("data", [])
 
     async def iter_markets(
-        self, *, page_size: int = 500, **filters: Any
+        self, *, page_size: int = 500, max_rows: int = 0, **filters: Any
     ) -> list[dict[str, Any]]:
+        """Paginate through markets. max_rows=0 means unlimited."""
         out: list[dict[str, Any]] = []
         offset = 0
         while True:
@@ -68,6 +69,9 @@ class GammaClient(BaseClient):
             if not page:
                 break
             out.extend(page)
+            if max_rows and len(out) >= max_rows:
+                out = out[:max_rows]
+                break
             if len(page) < page_size:
                 break
             offset += page_size
@@ -109,7 +113,7 @@ class GammaClient(BaseClient):
         return data if isinstance(data, list) else data.get("data", [])
 
     async def iter_events(
-        self, *, page_size: int = 200, **filters: Any
+        self, *, page_size: int = 200, max_rows: int = 0, **filters: Any
     ) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         offset = 0
@@ -118,6 +122,9 @@ class GammaClient(BaseClient):
             if not page:
                 break
             out.extend(page)
+            if max_rows and len(out) >= max_rows:
+                out = out[:max_rows]
+                break
             if len(page) < page_size:
                 break
             offset += page_size

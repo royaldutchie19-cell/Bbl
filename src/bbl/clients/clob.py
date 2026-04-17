@@ -43,14 +43,19 @@ class ClobClient(BaseClient):
             params["next_cursor"] = next_cursor
         return await self.get("/markets", **params)
 
-    async def iter_markets(self) -> list[dict[str, Any]]:
+    async def iter_markets(self, *, max_pages: int = 0) -> list[dict[str, Any]]:
+        """Paginate all CLOB markets. max_pages=0 means unlimited."""
         out: list[dict[str, Any]] = []
         cursor: str | None = None
+        pages = 0
         while True:
             page = await self.list_markets(next_cursor=cursor)
             out.extend(page.get("data", []))
             cursor = page.get("next_cursor")
+            pages += 1
             if not cursor or cursor == "LTE=":
+                break
+            if max_pages and pages >= max_pages:
                 break
         return out
 
