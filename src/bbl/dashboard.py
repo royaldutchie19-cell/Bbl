@@ -230,6 +230,14 @@ elif page == "Traders":
             df["archetype"] = tax.apply(lambda d: d.get("archetype", ""))
             df["tier"] = tax.apply(lambda d: d.get("tier", ""))
             df["copyability"] = tax.apply(lambda d: d.get("copyability"))
+
+        trader_labels = ["(select a trader)"] + [
+            f"{_fmt_addr(r['address'])} {r['username'] or ''} — ${r['pnl']:+,.0f}"
+            for _, r in df.iterrows()
+        ]
+        sel = st.selectbox("Inspect trader", range(len(trader_labels)),
+                           format_func=lambda i: trader_labels[i])
+
         col_order = [
             "short", "username", "archetype", "tier", "pnl", "volume", "trade_count",
             "win_rate", "avg_clv", "clv_pos_rate", "copyability",
@@ -254,6 +262,75 @@ elif page == "Traders":
             use_container_width=True, hide_index=True, height=520,
         )
 
+        if sel and sel > 0:
+            trader = df.iloc[sel - 1]
+            addr = trader["address"]
+            st.divider()
+            st.subheader(f"{trader['username'] or _fmt_addr(addr)}")
+
+            tc1, tc2, tc3, tc4, tc5 = st.columns(5)
+            tc1.metric("PnL", f"${trader['pnl']:+,.0f}")
+            tc2.metric("Volume", f"${trader['volume']:,.0f}")
+            tc3.metric("Trades", f"{int(trader['trade_count']):,}")
+            wr = trader.get("win_rate")
+            tc4.metric("Win rate", f"{wr*100:.0f}%" if pd.notna(wr) else "—")
+            arch = trader.get("archetype", "")
+            tier = trader.get("tier", "")
+            tc5.metric("Type", f"{arch} / {tier}" if arch else "—")
+
+            st.subheader("Active positions")
+            df_pos = _q(
+                db_path,
+                """
+                SELECT p.condition_id, p.token_id, p.outcome, p.size, p.avg_price,
+                       p.current_value, p.unrealized_pnl, m.question
+                  FROM positions p
+                  LEFT JOIN markets m ON m.condition_id = p.condition_id
+                 WHERE p.address = ?
+                   AND p.ts = (SELECT MAX(ts) FROM positions WHERE address = ?)
+                   AND p.size > 0
+                 ORDER BY p.current_value DESC
+                """,
+                (addr, addr),
+            )
+            if not df_pos.empty:
+                df_pos["question"] = df_pos["question"].fillna("").str.slice(0, 70)
+                st.dataframe(
+                    df_pos[["question", "outcome", "size", "avg_price", "current_value", "unrealized_pnl"]]
+                    .style.format({
+                        "size": "{:,.0f}", "avg_price": "{:.3f}",
+                        "current_value": "${:,.2f}", "unrealized_pnl": "${:+,.2f}",
+                    }, na_rep="—"),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.caption("No position snapshots for this trader yet.")
+
+            st.subheader("Recent trades")
+            df_rt = _q(
+                db_path,
+                """
+                SELECT t.ts, t.side, t.outcome, t.price, t.usdc_size, m.question
+                  FROM trades t
+                  LEFT JOIN markets m ON m.condition_id = t.condition_id
+                 WHERE t.taker = ? ORDER BY t.ts DESC LIMIT 30
+                """,
+                (addr,),
+            )
+            if not df_rt.empty:
+                df_rt["time"] = df_rt["ts"].apply(_human_ts)
+                df_rt["question"] = df_rt["question"].fillna("").str.slice(0, 60)
+                st.dataframe(
+                    df_rt[["time", "side", "outcome", "price", "usdc_size", "question"]]
+                    .style.format({"price": "{:.3f}", "usdc_size": "${:,.2f}"}),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.caption("No trades recorded for this wallet.")
+
+            st.caption(f"Full address: `{addr}` — copy to Wallet page for deeper analysis.")
+
+        st.divider()
         st.subheader("PnL distribution")
         fig = px.histogram(df, x="pnl", nbins=40, title=None)
         fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0))
@@ -477,31 +554,155 @@ elif page == "Markets":
         st.info("No markets matching.")
     else:
         df["question"] = df["question"].fillna("")
+        options = ["(none)"] + [
+            f"{r['question'][:80]} — ${r['volume_usdc']:,.0f}"
+            for _, r in df.iterrows()
+        ]
+        selected_idx = st.selectbox("Select market for detail", range(len(options)),
+                                    format_func=lambda i: options[i])
+
         st.dataframe(
             df.style.format({"volume_usdc": "${:,.0f}", "liquidity_usdc": "${:,.0f}"}),
             use_container_width=True,
             hide_index=True,
-            height=480,
+            height=380,
         )
 
-    st.subheader("Token price history")
-    tid = st.text_input("token_id", "")
-    if tid:
-        df2 = _q(
-            db_path,
-            """
-            SELECT ts, mid, best_bid, best_ask FROM price_snapshots
-             WHERE token_id = ? ORDER BY ts
-            """,
-            (tid,),
-        )
-        if df2.empty:
-            st.info("No price snapshots for this token yet.")
-        else:
-            df2["time"] = pd.to_datetime(df2["ts"], unit="s", utc=True)
-            fig = px.line(df2, x="time", y=["mid", "best_bid", "best_ask"])
-            fig.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0))
-            st.plotly_chart(fig, use_container_width=True)
+        if selected_idx and selected_idx > 0:
+            mkt = df.iloc[selected_idx - 1]
+            cid = mkt["condition_id"]
+            st.divider()
+            st.subheader(mkt["question"][:120])
+
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Volume", f"${mkt['volume_usdc']:,.0f}")
+            mc2.metric("Liquidity", f"${mkt['liquidity_usdc']:,.0f}")
+            mc3.metric("Category", mkt["category"] or "—")
+            mc4.metric("End date", mkt["end_date_iso"] or "—")
+
+            tokens = _q(
+                db_path,
+                "SELECT token_id, outcome, outcome_index, winner FROM market_tokens WHERE condition_id=?",
+                (cid,),
+            )
+
+            if not tokens.empty:
+                st.caption("Tokens")
+                for _, tk in tokens.iterrows():
+                    winner_tag = " ✓" if tk["winner"] == 1 else ""
+                    st.text(f"  {tk['outcome']}{winner_tag}: {tk['token_id'][:16]}…")
+
+                for _, tk in tokens.iterrows():
+                    tid = tk["token_id"]
+                    df_price = _q(
+                        db_path,
+                        "SELECT ts, mid, best_bid, best_ask FROM price_snapshots WHERE token_id=? ORDER BY ts",
+                        (tid,),
+                    )
+                    if not df_price.empty:
+                        df_price["time"] = pd.to_datetime(df_price["ts"], unit="s", utc=True)
+                        fig = px.line(df_price, x="time", y=["mid", "best_bid", "best_ask"],
+                                      title=f"Price — {tk['outcome']}")
+                        fig.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0))
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    df_ph = _q(
+                        db_path,
+                        "SELECT ts, price, open, high, low, close, volume FROM price_history WHERE token_id=? ORDER BY ts",
+                        (tid,),
+                    )
+                    if not df_ph.empty and df_price.empty:
+                        df_ph["time"] = pd.to_datetime(df_ph["ts"], unit="s", utc=True)
+                        fig = px.line(df_ph, x="time", y="price", title=f"Price history — {tk['outcome']}")
+                        fig.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0))
+                        st.plotly_chart(fig, use_container_width=True)
+
+            st.subheader("Recent trades")
+            df_t = _q(
+                db_path,
+                """
+                SELECT t.ts, t.side, t.outcome, t.price, t.size, t.usdc_size, t.taker,
+                       tr.username
+                  FROM trades t
+                  LEFT JOIN traders tr ON tr.address = t.taker
+                 WHERE t.condition_id = ?
+                 ORDER BY t.ts DESC LIMIT 50
+                """,
+                (cid,),
+            )
+            if not df_t.empty:
+                df_t["time"] = df_t["ts"].apply(_human_ts)
+                df_t["who"] = df_t.apply(
+                    lambda r: r["username"] if r["username"] else _fmt_addr(r["taker"]), axis=1
+                )
+                st.dataframe(
+                    df_t[["time", "side", "outcome", "price", "usdc_size", "who"]]
+                    .style.format({"price": "{:.3f}", "usdc_size": "${:,.2f}"}),
+                    use_container_width=True, hide_index=True, height=320,
+                )
+            else:
+                st.caption("No trades recorded for this market.")
+
+            st.subheader("Top holders")
+            df_h = _q(
+                db_path,
+                """
+                SELECT mh.address, mh.shares, mh.usdc_value, mh.token_id,
+                       mt.outcome, tr.username
+                  FROM market_holders mh
+                  LEFT JOIN market_tokens mt ON mt.token_id = mh.token_id
+                  LEFT JOIN traders tr ON tr.address = mh.address
+                 WHERE mh.condition_id = ?
+                   AND mh.ts = (SELECT MAX(ts) FROM market_holders WHERE condition_id = ?)
+                 ORDER BY mh.usdc_value DESC LIMIT 30
+                """,
+                (cid, cid),
+            )
+            if not df_h.empty:
+                df_h["who"] = df_h.apply(
+                    lambda r: r["username"] if r["username"] else _fmt_addr(r["address"]), axis=1
+                )
+                st.dataframe(
+                    df_h[["who", "outcome", "shares", "usdc_value"]]
+                    .style.format({"shares": "{:,.0f}", "usdc_value": "${:,.2f}"}),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.caption("No holder data for this market.")
+
+            sm = _q(
+                db_path,
+                """
+                SELECT ts, direction, signal_strength, trader_count, total_usdc, note
+                  FROM smart_money_signals WHERE condition_id = ?
+                 ORDER BY ts DESC LIMIT 10
+                """,
+                (cid,),
+            )
+            if not sm.empty:
+                st.subheader("Smart money signals")
+                sm["time"] = sm["ts"].apply(_human_ts)
+                st.dataframe(
+                    sm[["time", "direction", "note", "signal_strength", "trader_count", "total_usdc"]]
+                    .style.format({"signal_strength": "{:.2f}", "total_usdc": "${:,.0f}"}),
+                    use_container_width=True, hide_index=True,
+                )
+
+            score = _q(
+                db_path,
+                "SELECT * FROM market_scores WHERE condition_id = ?",
+                (cid,),
+            )
+            if not score.empty:
+                st.subheader("Market score")
+                s = score.iloc[0]
+                sc1, sc2, sc3, sc4, sc5, sc6 = st.columns(6)
+                sc1.metric("Composite", f"{s['composite_score']:.3f}")
+                sc2.metric("Vol velocity", f"{s['volume_velocity']:.1f}x")
+                sc3.metric("SM flow", f"${s['smart_money_flow']:+,.0f}")
+                sc4.metric("Trader influx", f"{s['trader_influx']:.0f}")
+                sc5.metric("Spread qual", f"{s['spread_quality']:.2f}")
+                sc6.metric("Holder conc", f"{s['holder_concentration']:.2f}")
 
 
 # ----------------------------------------------------------------- Wallet
@@ -537,6 +738,40 @@ elif page == "Wallet":
         cols[2].metric("Win rate", f"{(m['win_rate'] or 0)*100:.0f}%")
     else:
         st.info("No data yet for this wallet.")
+
+    st.subheader("Active positions")
+    df_pos = _q(
+        db_path,
+        """
+        SELECT p.condition_id, p.token_id, p.outcome, p.size, p.avg_price,
+               p.current_value, p.realized_pnl, p.unrealized_pnl, m.question
+          FROM positions p
+          LEFT JOIN markets m ON m.condition_id = p.condition_id
+         WHERE p.address = ?
+           AND p.ts = (SELECT MAX(ts) FROM positions WHERE address = ?)
+           AND p.size > 0
+         ORDER BY p.current_value DESC
+        """,
+        (addr, addr),
+    )
+    if not df_pos.empty:
+        total_val = df_pos["current_value"].sum()
+        total_upnl = df_pos["unrealized_pnl"].sum()
+        pc1, pc2, pc3 = st.columns(3)
+        pc1.metric("Positions", len(df_pos))
+        pc2.metric("Total value", f"${total_val:,.2f}")
+        pc3.metric("Unrealized PnL", f"${total_upnl:+,.2f}")
+        df_pos["question"] = df_pos["question"].fillna("").str.slice(0, 70)
+        st.dataframe(
+            df_pos[["question", "outcome", "size", "avg_price", "current_value", "unrealized_pnl"]]
+            .style.format({
+                "size": "{:,.0f}", "avg_price": "{:.3f}",
+                "current_value": "${:,.2f}", "unrealized_pnl": "${:+,.2f}",
+            }, na_rep="—"),
+            use_container_width=True, hide_index=True,
+        )
+    else:
+        st.caption("No position snapshots available. Run `bbl backfill top` to fetch positions.")
 
     st.subheader("Recent trades")
     df_trades = _q(
