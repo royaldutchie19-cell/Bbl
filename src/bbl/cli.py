@@ -27,6 +27,8 @@ from bbl.analyzer import (
     build_funding_links,
     classify_traders,
     compute_trader_metrics,
+    detect_alerts,
+    detect_arbitrage_opportunities,
     detect_patterns,
     detect_smart_money_signals,
     fetch_funding_for_top_wallets,
@@ -231,6 +233,30 @@ def analyze_taxonomy(config: str = typer.Option(None)) -> None:
     db.close()
 
 
+@analyze_app.command("arbitrage")
+def analyze_arbitrage(
+    min_gap: float = typer.Option(0.02, help="Min gap (1.0 - pair_cost) to flag"),
+    config: str = typer.Option(None),
+) -> None:
+    """Detect pair-cost arbitrage (YES+NO < $1.00)."""
+    cfg, db = _setup(config)
+    n = detect_arbitrage_opportunities(db, min_gap=min_gap)
+    console.print(f"[green]arbitrage[/green]: {n} opportunities")
+    db.close()
+
+
+@analyze_app.command("alerts")
+def analyze_alerts(
+    lookback: int = typer.Option(1, help="Lookback window in hours"),
+    config: str = typer.Option(None),
+) -> None:
+    """Detect alerts: price moves, large trades, volume spikes, pair cost."""
+    cfg, db = _setup(config)
+    n = detect_alerts(db, lookback_hours=lookback)
+    console.print(f"[green]alerts[/green]: {n} alerts generated")
+    db.close()
+
+
 @analyze_app.command("all")
 def analyze_all(
     include_funding: bool = typer.Option(False, help="Also fold funding-graph links into wallet_links"),
@@ -244,9 +270,11 @@ def analyze_all(
     e = classify_traders(cfg, db)
     f = detect_smart_money_signals(cfg, db)
     g = score_markets(cfg, db)
+    h = detect_arbitrage_opportunities(db)
+    i = detect_alerts(db)
     console.print(
         f"[green]done[/green] — metrics:{a} patterns:{b} links:{c} funding:{d} "
-        f"taxonomy:{e} signals:{f} market_scores:{g}"
+        f"taxonomy:{e} signals:{f} scores:{g} arb:{h} alerts:{i}"
     )
     db.close()
 

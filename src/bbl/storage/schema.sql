@@ -358,3 +358,37 @@ CREATE TABLE IF NOT EXISTS market_scores (
     breakdown_json     TEXT                     -- per-dimension detail
 );
 CREATE INDEX IF NOT EXISTS idx_market_scores ON market_scores(composite_score DESC);
+
+-- --------------------------------------------------------- arbitrage
+
+CREATE TABLE IF NOT EXISTS arbitrage_signals (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    condition_id         TEXT NOT NULL,
+    ts                   INTEGER NOT NULL,
+    yes_price            REAL,
+    no_price             REAL,
+    pair_cost            REAL,
+    gap                  REAL,
+    best_yes_ask         REAL,
+    best_no_ask          REAL,
+    ask_pair_cost        REAL,
+    estimated_profit_pct REAL
+);
+CREATE INDEX IF NOT EXISTS idx_arb_ts   ON arbitrage_signals(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_arb_cond ON arbitrage_signals(condition_id, ts);
+
+-- ------------------------------------------------------------ alerts
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           INTEGER NOT NULL,
+    alert_type   TEXT NOT NULL,
+    condition_id TEXT,
+    token_id     TEXT,
+    severity     TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    detail       TEXT,
+    value        REAL
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_ts   ON alerts(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type, ts);

@@ -1,5 +1,7 @@
 """Analyzer — derive trader metrics, detect patterns, link wallets."""
 
+from bbl.analyzer.alerts import detect_alerts
+from bbl.analyzer.arbitrage import detect_arbitrage_opportunities
 from bbl.analyzer.market_scoring import score_markets
 from bbl.analyzer.onchain_links import build_funding_links, fetch_funding_for_top_wallets
 from bbl.analyzer.patterns import detect_patterns
@@ -12,6 +14,8 @@ __all__ = [
     "build_funding_links",
     "classify_traders",
     "compute_trader_metrics",
+    "detect_alerts",
+    "detect_arbitrage_opportunities",
     "detect_patterns",
     "detect_smart_money_signals",
     "fetch_funding_for_top_wallets",

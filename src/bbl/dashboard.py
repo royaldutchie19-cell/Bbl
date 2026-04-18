@@ -68,6 +68,8 @@ if not Path(db_path).exists():
 
 PAGES = [
     "Overview",
+    "Alerts",
+    "Arbitrage",
     "Traders",
     "Smart Money",
     "Market Scores",
@@ -96,10 +98,10 @@ if page == "Overview":
         ("trades", "Trades"),
         ("traders", "Traders"),
         ("trader_metrics", "Analyzed"),
+        ("alerts", "Alerts"),
+        ("arbitrage_signals", "Arb opps"),
         ("smart_money_signals", "SM signals"),
         ("market_scores", "Scored mkts"),
-        ("wallet_links", "Links"),
-        ("funding_transfers", "Funding txs"),
     ]
     cols = st.columns(len(tables))
     for (tbl, label), col in zip(tables, cols):
@@ -930,6 +932,121 @@ elif page == "Linked Wallets":
                     st.json(json.loads(r["evidence_json"] or "{}"))
                 except Exception:
                     st.text(r["evidence_json"])
+
+
+# ----------------------------------------------------------------- Alerts
+
+elif page == "Alerts":
+    st.title("Market alerts")
+    st.caption("Price moves, large trades, volume spikes, pair cost anomalies.")
+
+    c1, c2, c3 = st.columns(3)
+    alert_type = c1.selectbox("Type", ["(all)", "price_move", "large_trade", "volume_spike", "pair_cost_alert"])
+    severity = c2.selectbox("Severity", ["(all)", "critical", "warning", "info"])
+    limit = c3.number_input("Rows", 10, 500, 50, 10)
+
+    where_parts = []
+    alert_params: list = []
+    if alert_type != "(all)":
+        where_parts.append("a.alert_type = ?")
+        alert_params.append(alert_type)
+    if severity != "(all)":
+        where_parts.append("a.severity = ?")
+        alert_params.append(severity)
+    where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    alert_params.append(int(limit))
+
+    df = _q(
+        db_path,
+        f"""
+        SELECT a.ts, a.alert_type, a.severity, a.title, a.detail, a.value,
+               m.question
+          FROM alerts a
+          LEFT JOIN markets m ON m.condition_id = a.condition_id
+         {where_sql}
+         ORDER BY a.ts DESC
+         LIMIT ?
+        """,
+        tuple(alert_params),
+    )
+    if df.empty:
+        st.info("No alerts yet — run `bbl analyze alerts`.")
+    else:
+        df["time"] = df["ts"].apply(_human_ts)
+        df["question"] = df["question"].fillna("").str.slice(0, 60)
+
+        sev_counts = df["severity"].value_counts()
+        ac1, ac2, ac3 = st.columns(3)
+        ac1.metric("Critical", int(sev_counts.get("critical", 0)))
+        ac2.metric("Warning", int(sev_counts.get("warning", 0)))
+        ac3.metric("Info", int(sev_counts.get("info", 0)))
+
+        st.dataframe(
+            df[["time", "alert_type", "severity", "title", "detail", "question"]],
+            use_container_width=True, hide_index=True, height=480,
+            column_config={
+                "alert_type": "Type",
+                "severity": "Sev",
+            },
+        )
+
+        st.subheader("Alerts over time")
+        df["dt"] = pd.to_datetime(df["ts"], unit="s", utc=True)
+        fig = px.scatter(df, x="dt", y="value", color="alert_type",
+                         symbol="severity", hover_data=["title", "question"])
+        fig.update_layout(height=350, margin=dict(l=0, r=0, t=10, b=0))
+        st.plotly_chart(fig, use_container_width=True)
+
+
+# --------------------------------------------------------------- Arbitrage
+
+elif page == "Arbitrage":
+    st.title("Pair cost arbitrage")
+    st.caption("Markets where YES + NO < $1.00 — potential risk-free profit.")
+
+    df = _q(
+        db_path,
+        """
+        SELECT a.condition_id, a.ts, a.yes_price, a.no_price,
+               a.pair_cost, a.gap, a.best_yes_ask, a.best_no_ask,
+               a.ask_pair_cost, a.estimated_profit_pct, m.question
+          FROM arbitrage_signals a
+          LEFT JOIN markets m ON m.condition_id = a.condition_id
+         WHERE a.ts = (SELECT MAX(ts) FROM arbitrage_signals)
+         ORDER BY a.gap DESC
+        """,
+    )
+    if df.empty:
+        st.info("No arbitrage signals yet — run `bbl analyze arbitrage`.")
+    else:
+        df["question"] = df["question"].fillna("").str.slice(0, 70)
+        df["time"] = df["ts"].apply(_human_ts)
+
+        st.metric("Opportunities found", len(df))
+
+        st.dataframe(
+            df[["question", "yes_price", "no_price", "pair_cost", "gap",
+                "best_yes_ask", "best_no_ask", "ask_pair_cost", "estimated_profit_pct"]],
+            use_container_width=True, hide_index=True, height=480,
+            column_config={
+                "yes_price": st.column_config.NumberColumn("Yes", format="%.4f"),
+                "no_price": st.column_config.NumberColumn("No", format="%.4f"),
+                "pair_cost": st.column_config.NumberColumn("Pair $", format="%.4f"),
+                "gap": st.column_config.NumberColumn("Gap", format="%.4f"),
+                "best_yes_ask": st.column_config.NumberColumn("Ask Yes", format="%.4f"),
+                "best_no_ask": st.column_config.NumberColumn("Ask No", format="%.4f"),
+                "ask_pair_cost": st.column_config.NumberColumn("Ask Pair $", format="%.4f"),
+                "estimated_profit_pct": st.column_config.NumberColumn("Profit %", format="%.2f%%"),
+            },
+        )
+
+        if len(df) > 1:
+            st.subheader("Gap distribution")
+            fig = px.bar(df.head(20), x="question", y="gap", color="estimated_profit_pct",
+                         color_continuous_scale="YlOrRd")
+            fig.update_layout(height=350, margin=dict(l=0, r=0, t=10, b=0),
+                              xaxis_tickangle=-45)
+            st.plotly_chart(fig, use_container_width=True)
 
 
 # -------------------------------------------------------- Collector Health
