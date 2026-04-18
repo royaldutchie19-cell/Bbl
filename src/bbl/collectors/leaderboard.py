@@ -58,21 +58,20 @@ class LeaderboardCollector(BaseCollector):
             if unique:
                 rows += self.db.upsert_traders(unique)
 
-            try:
-                top = await data.get_leaderboard(window="all", metric="profit", limit=200)
-                for entry in top[:50]:
-                    addr = (entry.get("proxyWallet") or entry.get("address") or "").lower()
-                    if not addr:
-                        continue
-                    try:
-                        profile = await data.get_user(addr)
-                        if profile:
-                            profile.setdefault("proxyWallet", addr)
-                            self.db.upsert_traders([profile])
-                    except Exception:
-                        pass
-            except Exception as e:
-                log.warning("leaderboard enrichment failed: %s", e)
+            enriched = 0
+            for e in unique[:100]:
+                addr = (e.get("proxyWallet") or e.get("address") or "").lower()
+                if not addr:
+                    continue
+                try:
+                    profile = await data.get_user(addr)
+                    if profile:
+                        profile.setdefault("proxyWallet", addr)
+                        self.db.upsert_traders([profile])
+                        enriched += 1
+                except Exception:
+                    pass
+            log.info("enriched %d trader profiles", enriched)
 
         return CollectorResult(rows_written=rows)
 

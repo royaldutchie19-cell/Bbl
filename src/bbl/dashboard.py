@@ -178,10 +178,13 @@ if page == "Overview":
 elif page == "Traders":
     st.title("Trader performance")
 
+    search_q = st.text_input("Search trader (address or username)", "",
+                             placeholder="Type address, username, or leave empty for full list")
+
     c1, c2, c3 = st.columns([2, 2, 2])
     sort_by = c1.selectbox("Sort by", ["pnl", "volume", "trade_count", "win_rate", "early_entry"], index=0)
     min_trades = c2.number_input("Min trades", 0, 10000, 0, 10)
-    limit = c3.number_input("Rows", 10, 2000, 100, 10)
+    limit = c3.number_input("Rows", 10, 2000, 200, 10)
 
     sort_col = {
         "pnl": "COALESCE(t.total_pnl_usdc, 0)",
@@ -191,6 +194,14 @@ elif page == "Traders":
         "early_entry": "COALESCE(tm.early_entry_score, 1)",
     }[sort_by]
     sort_dir = "ASC" if sort_by == "early_entry" else "DESC"
+
+    search_clause = ""
+    search_params: list = [int(min_trades)]
+    if search_q.strip():
+        search_clause = "AND (t.address LIKE ? OR COALESCE(t.username,'') LIKE ?)"
+        sq = f"%{search_q.strip()}%"
+        search_params.extend([sq, sq])
+    search_params.append(int(limit))
 
     df = _q(
         db_path,
@@ -208,13 +219,14 @@ elif page == "Traders":
           FROM traders t
           LEFT JOIN trader_metrics tm ON tm.address = t.address
          WHERE COALESCE(t.trade_count, 0) >= ?
+               {search_clause}
          ORDER BY {sort_col} {sort_dir}
          LIMIT ?
         """,
-        (int(min_trades), int(limit)),
+        tuple(search_params),
     )
     if df.empty:
-        st.info("No traders yet — run `bbl collect once --collectors leaderboard`.")
+        st.info("No traders matching — try different filters or run `bbl collect once --collectors leaderboard`.")
     else:
         df["short"] = df["address"].apply(_fmt_addr)
         if "avg_holding_secs" in df.columns:
@@ -231,39 +243,33 @@ elif page == "Traders":
             df["tier"] = tax.apply(lambda d: d.get("tier", ""))
             df["copyability"] = tax.apply(lambda d: d.get("copyability"))
 
-        trader_labels = ["(select a trader)"] + [
-            f"{_fmt_addr(r['address'])} {r['username'] or ''} — ${r['pnl']:+,.0f}"
-            for _, r in df.iterrows()
-        ]
-        sel = st.selectbox("Inspect trader", range(len(trader_labels)),
-                           format_func=lambda i: trader_labels[i])
-
         col_order = [
             "short", "username", "archetype", "tier", "pnl", "volume", "trade_count",
             "win_rate", "avg_clv", "clv_pos_rate", "copyability",
             "markets_traded", "early_entry_score",
         ]
         present = [c for c in col_order if c in df.columns]
-        fmt = {
-            "pnl": "${:+,.0f}", "volume": "${:,.0f}",
-            "avg_trade_size": "${:,.0f}",
-            "win_rate": "{:.0%}",
-            "avg_clv": "{:+.3f}",
-            "clv_pos_rate": "{:.0%}",
-            "copyability": "{:.2f}",
-            "early_entry_score": "{:.2f}",
-            "contrarian_score": "{:+.2f}",
-        }
-        st.dataframe(
-            df[present].style.format(
-                {k: v for k, v in fmt.items() if k in present},
-                na_rep="—",
-            ),
-            use_container_width=True, hide_index=True, height=520,
+
+        st.caption("Click a row to inspect the trader.")
+        event = st.dataframe(
+            df[present],
+            use_container_width=True, hide_index=True, height=480,
+            on_select="rerun", selection_mode="single-row",
+            column_config={
+                "pnl": st.column_config.NumberColumn("PnL", format="$%+,.0f"),
+                "volume": st.column_config.NumberColumn("Volume", format="$%,.0f"),
+                "win_rate": st.column_config.NumberColumn("Win%", format="%.0%%"),
+                "avg_clv": st.column_config.NumberColumn("CLV", format="%+.3f"),
+                "clv_pos_rate": st.column_config.NumberColumn("CLV+%", format="%.0%%"),
+                "copyability": st.column_config.NumberColumn("Copy", format="%.2f"),
+                "early_entry_score": st.column_config.NumberColumn("Early", format="%.2f"),
+            },
         )
 
-        if sel and sel > 0:
-            trader = df.iloc[sel - 1]
+        selected_rows = event.selection.rows if event.selection else []
+        if selected_rows:
+            idx = selected_rows[0]
+            trader = df.iloc[idx]
             addr = trader["address"]
             st.divider()
             st.subheader(f"{trader['username'] or _fmt_addr(addr)}")
@@ -328,7 +334,7 @@ elif page == "Traders":
             else:
                 st.caption("No trades recorded for this wallet.")
 
-            st.caption(f"Full address: `{addr}` — copy to Wallet page for deeper analysis.")
+            st.caption(f"Full address: `{addr}`")
 
         st.divider()
         st.subheader("PnL distribution")

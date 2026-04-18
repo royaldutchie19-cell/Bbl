@@ -30,15 +30,24 @@ class TradesCollector(BaseCollector):
         new_addrs: set[str] = set()
 
         async with DataClient(self.cfg.api) as data:
-            try:
-                recent = await data.get_trades(limit=500, taker_only=True)
-                rows += self.db.insert_trades(recent)
-                for t in recent:
-                    addr = (t.get("proxyWallet") or t.get("taker") or t.get("user") or "").lower()
-                    if addr:
-                        new_addrs.add(addr)
-            except Exception as e:
-                log.warning("global trades fetch failed: %s", e)
+            for page in range(5):
+                try:
+                    recent = await data.get_trades(
+                        limit=500, offset=page * 500, taker_only=True,
+                    )
+                    if not recent:
+                        break
+                    inserted = self.db.insert_trades(recent)
+                    rows += inserted
+                    for t in recent:
+                        addr = (t.get("proxyWallet") or t.get("taker") or t.get("user") or "").lower()
+                        if addr:
+                            new_addrs.add(addr)
+                    if inserted == 0:
+                        break
+                except Exception as e:
+                    log.warning("global trades fetch page %d failed: %s", page, e)
+                    break
 
             watch_addrs = [
                 r[0]
