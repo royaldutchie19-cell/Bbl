@@ -204,6 +204,21 @@ class DataClient(BaseClient):
         )
         return data if isinstance(data, list) else data.get("data", [])
 
+    # -------------------------------------------------------- profit-loss
+
+    async def get_profit_loss(
+        self,
+        *,
+        user: str,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Per-position profit/loss breakdown for a wallet."""
+        data = await self.get(
+            "/profit-loss", user=user, limit=limit, offset=offset
+        )
+        return data if isinstance(data, list) else data.get("data", [])
+
     # ------------------------------------------------------------ rewards
 
     async def get_user_rewards(

@@ -389,6 +389,39 @@ class Database:
                 rows += 1
         return rows
 
+    def insert_profit_loss(
+        self, address: str, entries: Iterable[dict[str, Any]]
+    ) -> int:
+        rows = 0
+        with self.tx() as cur:
+            for p in entries:
+                cid = p.get("conditionId") or p.get("market") or p.get("condition_id")
+                if not cid:
+                    continue
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO profit_loss
+                        (address, condition_id, outcome, size, avg_price, cur_price,
+                         initial_value, current_value, pnl, realized_pnl, raw_json)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        address.lower(),
+                        cid,
+                        p.get("outcome"),
+                        _f(p.get("size")),
+                        _f(p.get("avgPrice") or p.get("avg_price")),
+                        _f(p.get("curPrice") or p.get("currentPrice") or p.get("cur_price")),
+                        _f(p.get("initialValue") or p.get("initial_value")),
+                        _f(p.get("currentValue") or p.get("current_value")),
+                        _f(p.get("pnl")),
+                        _f(p.get("realizedPnl") or p.get("realized_pnl")),
+                        json.dumps(p, default=str),
+                    ),
+                )
+                rows += 1
+        return rows
+
     def insert_user_rewards(
         self, address: str, entries: Iterable[dict[str, Any]]
     ) -> int:

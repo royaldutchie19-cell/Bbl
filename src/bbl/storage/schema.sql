@@ -234,6 +234,24 @@ CREATE TABLE IF NOT EXISTS user_rewards (
     PRIMARY KEY (address, ts, source)
 );
 
+-- Per-position profit/loss from data-api /profit-loss.
+CREATE TABLE IF NOT EXISTS profit_loss (
+    address       TEXT NOT NULL,
+    condition_id  TEXT NOT NULL,
+    outcome       TEXT,
+    size          REAL,
+    avg_price     REAL,
+    cur_price     REAL,
+    initial_value REAL,
+    current_value REAL,
+    pnl           REAL,
+    realized_pnl  REAL,
+    raw_json      TEXT,
+    PRIMARY KEY (address, condition_id, outcome)
+);
+CREATE INDEX IF NOT EXISTS idx_pl_address ON profit_loss(address);
+CREATE INDEX IF NOT EXISTS idx_pl_pnl     ON profit_loss(pnl DESC);
+
 -- Top holders per market (who owns the resolved tokens).
 CREATE TABLE IF NOT EXISTS market_holders (
     ts            INTEGER NOT NULL,

@@ -38,7 +38,7 @@ async def enrich_wallet(
 ) -> dict[str, int]:
     """Pull everything we can about a single wallet. Returns rows-per-source."""
     addr = address.lower()
-    stats = {"positions": 0, "pnl": 0, "portfolio": 0, "rewards": 0, "clob_rewards": 0}
+    stats = {"positions": 0, "pnl": 0, "profit_loss": 0, "portfolio": 0, "rewards": 0, "clob_rewards": 0}
     now = int(time.time())
 
     async with DataClient(cfg.api) as data:
@@ -62,6 +62,13 @@ async def enrich_wallet(
                 stats["pnl"] = db.insert_user_pnl_series(addr, series or [])
             except Exception as e:
                 log.warning("pnl for %s failed: %s", addr, e)
+
+            try:
+                pl = await data.get_profit_loss(user=addr, limit=500)
+                if pl:
+                    stats["profit_loss"] = db.insert_profit_loss(addr, pl)
+            except Exception as e:
+                log.warning("profit-loss for %s failed: %s", addr, e)
 
         if rewards:
             try:

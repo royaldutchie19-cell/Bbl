@@ -797,6 +797,39 @@ elif page == "Wallet":
     else:
         st.caption("No position snapshots available. Run `bbl backfill top` to fetch positions.")
 
+    st.subheader("Per-market PnL")
+    df_pl = _q(
+        db_path,
+        """
+        SELECT pl.condition_id, pl.outcome, pl.size, pl.avg_price, pl.cur_price,
+               pl.pnl, pl.realized_pnl, m.question
+          FROM profit_loss pl
+          LEFT JOIN markets m ON m.condition_id = pl.condition_id
+         WHERE pl.address = ?
+         ORDER BY pl.pnl DESC
+        """,
+        (addr,),
+    )
+    if not df_pl.empty:
+        total_pl = df_pl["pnl"].sum()
+        wins = (df_pl["pnl"] > 0).sum()
+        losses = (df_pl["pnl"] <= 0).sum()
+        pl1, pl2, pl3 = st.columns(3)
+        pl1.metric("Total PnL", f"${total_pl:+,.2f}")
+        pl2.metric("Winners", int(wins))
+        pl3.metric("Losers", int(losses))
+        df_pl["question"] = df_pl["question"].fillna("").str.slice(0, 60)
+        st.dataframe(
+            df_pl[["question", "outcome", "size", "avg_price", "cur_price", "pnl"]]
+            .style.format({
+                "size": "{:,.0f}", "avg_price": "{:.3f}", "cur_price": "{:.3f}",
+                "pnl": "${:+,.2f}",
+            }, na_rep="—"),
+            use_container_width=True, hide_index=True, height=320,
+        )
+    else:
+        st.caption("No profit/loss data. Run `bbl enrich wallet <addr>` to fetch.")
+
     st.subheader("Recent trades")
     df_trades = _q(
         db_path,
