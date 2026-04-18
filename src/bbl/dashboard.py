@@ -116,17 +116,24 @@ if page == "Overview":
         df = _q(
             db_path,
             """
-            SELECT condition_id, question, category, volume_usdc, liquidity_usdc
+            SELECT condition_id, question, category,
+                   yes_price, volume_24h, volume_usdc, liquidity_usdc
               FROM markets WHERE active=1 AND closed=0
              ORDER BY volume_usdc DESC LIMIT 15
             """,
         )
         if not df.empty:
             df["question"] = df["question"].fillna("").str.slice(0, 80)
+            df["yes%"] = (df["yes_price"].fillna(0) * 100).round(1)
             st.dataframe(
-                df[["question", "category", "volume_usdc", "liquidity_usdc"]],
+                df[["question", "yes%", "category", "volume_24h", "volume_usdc"]],
                 use_container_width=True,
                 hide_index=True,
+                column_config={
+                    "yes%": st.column_config.NumberColumn("Yes %", format="%.1f%%"),
+                    "volume_24h": st.column_config.NumberColumn("24h Vol", format="$%,.0f"),
+                    "volume_usdc": st.column_config.NumberColumn("Total Vol", format="$%,.0f"),
+                },
             )
         else:
             st.info("No markets yet — run `bbl collect once --collectors markets`.")
@@ -550,7 +557,8 @@ elif page == "Markets":
         db_path,
         f"""
         SELECT condition_id, question, category, end_date_iso,
-               volume_usdc, liquidity_usdc, active, closed
+               yes_price, no_price, volume_24h, volume_usdc, liquidity_usdc,
+               active, closed
           FROM markets {clause}
          ORDER BY volume_usdc DESC LIMIT 300
         """,
@@ -560,31 +568,39 @@ elif page == "Markets":
         st.info("No markets matching.")
     else:
         df["question"] = df["question"].fillna("")
-        options = ["(none)"] + [
-            f"{r['question'][:80]} — ${r['volume_usdc']:,.0f}"
-            for _, r in df.iterrows()
-        ]
-        selected_idx = st.selectbox("Select market for detail", range(len(options)),
-                                    format_func=lambda i: options[i])
+        df["yes%"] = (df["yes_price"].fillna(0) * 100).round(1)
+        df["no%"] = (df["no_price"].fillna(0) * 100).round(1)
 
-        st.dataframe(
-            df.style.format({"volume_usdc": "${:,.0f}", "liquidity_usdc": "${:,.0f}"}),
+        st.caption("Click a row to see market details.")
+        event = st.dataframe(
+            df[["question", "category", "yes%", "no%", "volume_24h", "volume_usdc", "liquidity_usdc"]],
             use_container_width=True,
             hide_index=True,
-            height=380,
+            height=400,
+            on_select="rerun",
+            selection_mode="single-row",
+            column_config={
+                "yes%": st.column_config.NumberColumn("Yes %", format="%.1f%%"),
+                "no%": st.column_config.NumberColumn("No %", format="%.1f%%"),
+                "volume_24h": st.column_config.NumberColumn("24h Vol", format="$%,.0f"),
+                "volume_usdc": st.column_config.NumberColumn("Total Vol", format="$%,.0f"),
+                "liquidity_usdc": st.column_config.NumberColumn("Liquidity", format="$%,.0f"),
+            },
         )
 
-        if selected_idx and selected_idx > 0:
-            mkt = df.iloc[selected_idx - 1]
+        selected_rows = event.selection.rows if event.selection else []
+        if selected_rows:
+            mkt = df.iloc[selected_rows[0]]
             cid = mkt["condition_id"]
             st.divider()
             st.subheader(mkt["question"][:120])
 
-            mc1, mc2, mc3, mc4 = st.columns(4)
-            mc1.metric("Volume", f"${mkt['volume_usdc']:,.0f}")
-            mc2.metric("Liquidity", f"${mkt['liquidity_usdc']:,.0f}")
-            mc3.metric("Category", mkt["category"] or "—")
-            mc4.metric("End date", mkt["end_date_iso"] or "—")
+            mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+            mc1.metric("Yes", f"{mkt['yes%']:.1f}%")
+            mc2.metric("24h Volume", f"${mkt['volume_24h']:,.0f}")
+            mc3.metric("Total Volume", f"${mkt['volume_usdc']:,.0f}")
+            mc4.metric("Liquidity", f"${mkt['liquidity_usdc']:,.0f}")
+            mc5.metric("Category", mkt["category"] or "—")
 
             tokens = _q(
                 db_path,

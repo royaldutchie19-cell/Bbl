@@ -15,12 +15,24 @@ def _schema_sql() -> str:
     return resources.files("bbl.storage").joinpath("schema.sql").read_text()
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(markets)").fetchall()}
+    for col, typedef in [
+        ("volume_24h", "REAL DEFAULT 0"),
+        ("yes_price", "REAL"),
+        ("no_price", "REAL"),
+    ]:
+        if col not in cols:
+            conn.execute(f"ALTER TABLE markets ADD COLUMN {col} {typedef}")
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(_schema_sql())
+    _migrate(conn)
     return conn
 
 
@@ -44,13 +56,15 @@ class Database:
                 cond = m.get("conditionId") or m.get("condition_id")
                 if not cond:
                     continue
+                yes_price, no_price = _parse_outcome_prices(m)
                 cur.execute(
                     """
                     INSERT INTO markets (condition_id, question_id, slug, question,
                         description, category, event_id, end_date_iso,
                         active, closed, archived, volume_usdc, liquidity_usdc,
+                        volume_24h, yes_price, no_price,
                         min_tick_size, raw_json, first_seen_ts, last_seen_ts)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(condition_id) DO UPDATE SET
                         question=excluded.question,
                         slug=excluded.slug,
@@ -59,6 +73,9 @@ class Database:
                         archived=excluded.archived,
                         volume_usdc=excluded.volume_usdc,
                         liquidity_usdc=excluded.liquidity_usdc,
+                        volume_24h=COALESCE(excluded.volume_24h, markets.volume_24h),
+                        yes_price=COALESCE(excluded.yes_price, markets.yes_price),
+                        no_price=COALESCE(excluded.no_price, markets.no_price),
                         raw_json=excluded.raw_json,
                         last_seen_ts=excluded.last_seen_ts
                     """,
@@ -76,6 +93,9 @@ class Database:
                         int(bool(m.get("archived", False))),
                         float(m.get("volumeNum") or m.get("volume") or 0),
                         float(m.get("liquidityNum") or m.get("liquidity") or 0),
+                        float(m.get("volume24hr") or m.get("volume_24h") or 0) or None,
+                        yes_price,
+                        no_price,
                         float(m.get("minimumTickSize") or m.get("minTickSize") or 0) or None,
                         json.dumps(m, default=str),
                         now,
@@ -580,6 +600,24 @@ def _coerce_ts(x: Any) -> int:
         except Exception:
             return int(time.time())
     return int(time.time())
+
+
+def _parse_outcome_prices(m: dict[str, Any]) -> tuple[float | None, float | None]:
+    """Extract Yes/No probability from outcomePrices field."""
+    raw = m.get("outcomePrices")
+    if not raw:
+        return None, None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return None, None
+    if isinstance(raw, list) and len(raw) >= 2:
+        try:
+            return float(raw[0]), float(raw[1])
+        except (ValueError, TypeError):
+            return None, None
+    return None, None
 
 
 def _extract_tokens(m: dict[str, Any]) -> list[dict[str, Any]]:

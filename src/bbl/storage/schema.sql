@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS markets (
     archived         INTEGER DEFAULT 0,
     volume_usdc      REAL DEFAULT 0,
     liquidity_usdc   REAL DEFAULT 0,
+    volume_24h       REAL DEFAULT 0,
+    yes_price        REAL,                   -- outcome probability 0..1
+    no_price         REAL,
     min_tick_size    REAL,
     raw_json         TEXT,                    -- full payload for later back-fill
     first_seen_ts    INTEGER NOT NULL,
