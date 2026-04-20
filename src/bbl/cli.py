@@ -26,6 +26,7 @@ from rich.table import Table
 from bbl.analyzer import (
     build_funding_links,
     classify_traders,
+    compute_market_trader_rankings,
     compute_trader_metrics,
     detect_alerts,
     detect_arbitrage_opportunities,
@@ -35,6 +36,9 @@ from bbl.analyzer import (
     find_wallet_links,
     score_markets,
 )
+from bbl.analyzer.category_expertise import compute_category_expertise
+from bbl.analyzer.fresh_wallets import detect_fresh_wallets
+from bbl.analyzer.position_changes import detect_position_changes
 from bbl.backfill import backfill_top_traders, backfill_wallet
 from bbl.collectors import ALL_COLLECTORS
 from bbl.config import Config
@@ -257,6 +261,46 @@ def analyze_alerts(
     db.close()
 
 
+@analyze_app.command("market-traders")
+def analyze_market_traders(config: str = typer.Option(None)) -> None:
+    """Rank traders per market by activity and estimated PnL."""
+    cfg, db = _setup(config)
+    n = compute_market_trader_rankings(db)
+    console.print(f"[green]market_traders[/green]: {n} rows")
+    db.close()
+
+
+@analyze_app.command("categories")
+def analyze_categories(config: str = typer.Option(None)) -> None:
+    """Compute per-category expertise for each trader."""
+    cfg, db = _setup(config)
+    n = compute_category_expertise(db)
+    console.print(f"[green]trader_categories[/green]: {n} rows")
+    db.close()
+
+
+@analyze_app.command("position-changes")
+def analyze_position_changes(config: str = typer.Option(None)) -> None:
+    """Detect position entries, exits, increases, and decreases."""
+    cfg, db = _setup(config)
+    n = detect_position_changes(db)
+    console.print(f"[green]position_changes[/green]: {n} changes")
+    db.close()
+
+
+@analyze_app.command("fresh-wallets")
+def analyze_fresh_wallets(
+    max_age: int = typer.Option(30, help="Max wallet age in days"),
+    min_pnl: float = typer.Option(1000, help="Min PnL to flag"),
+    config: str = typer.Option(None),
+) -> None:
+    """Detect suspiciously profitable new wallets."""
+    cfg, db = _setup(config)
+    n = detect_fresh_wallets(db, max_age_days=max_age, min_pnl=min_pnl)
+    console.print(f"[green]fresh_wallets[/green]: {n} detected")
+    db.close()
+
+
 @analyze_app.command("all")
 def analyze_all(
     include_funding: bool = typer.Option(False, help="Also fold funding-graph links into wallet_links"),
@@ -272,9 +316,14 @@ def analyze_all(
     g = score_markets(cfg, db)
     h = detect_arbitrage_opportunities(db)
     i = detect_alerts(db)
+    j = compute_market_trader_rankings(db)
+    k = compute_category_expertise(db)
+    l = detect_position_changes(db)
+    m = detect_fresh_wallets(db)
     console.print(
         f"[green]done[/green] — metrics:{a} patterns:{b} links:{c} funding:{d} "
-        f"taxonomy:{e} signals:{f} scores:{g} arb:{h} alerts:{i}"
+        f"taxonomy:{e} signals:{f} scores:{g} arb:{h} alerts:{i} "
+        f"mkt_traders:{j} categories:{k} pos_changes:{l} fresh:{m}"
     )
     db.close()
 

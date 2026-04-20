@@ -71,6 +71,9 @@ PAGES = [
     "Alerts",
     "Arbitrage",
     "Traders",
+    "Category Experts",
+    "Fresh Wallets",
+    "Position Changes",
     "Smart Money",
     "Market Scores",
     "Leaderboard",
@@ -360,6 +363,170 @@ elif page == "Traders":
         )
         fig2.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0))
         st.plotly_chart(fig2, use_container_width=True)
+
+
+# -------------------------------------------------------------- Smart Money
+
+# --------------------------------------------------------- Category Experts
+
+elif page == "Category Experts":
+    st.title("Category expertise")
+    st.caption("Per-category performance for each trader — find the specialists.")
+
+    categories = _q(db_path, "SELECT DISTINCT category FROM trader_categories WHERE category IS NOT NULL ORDER BY category")
+    cat_list = ["(all)"] + categories["category"].tolist() if not categories.empty else ["(all)"]
+    c1, c2, c3 = st.columns(3)
+    sel_cat = c1.selectbox("Category", cat_list)
+    sort = c2.selectbox("Sort by", ["estimated_pnl", "win_rate", "trade_count", "markets_traded"], index=0)
+    limit = c3.number_input("Rows", 10, 500, 50, 10)
+
+    cat_where = ""
+    cat_params: list = []
+    if sel_cat != "(all)":
+        cat_where = "AND tc.category = ?"
+        cat_params.append(sel_cat)
+    cat_params.append(int(limit))
+
+    df = _q(
+        db_path,
+        f"""
+        SELECT tc.address, tc.category, tc.trade_count, tc.buy_volume, tc.sell_volume,
+               tc.estimated_pnl, tc.win_rate, tc.win_count, tc.loss_count,
+               tc.markets_traded, t.username
+          FROM trader_categories tc
+          LEFT JOIN traders t ON t.address = tc.address
+         WHERE tc.trade_count >= 3 {cat_where}
+         ORDER BY tc.{sort} DESC
+         LIMIT ?
+        """,
+        tuple(cat_params),
+    )
+    if df.empty:
+        st.info("No category data yet — run `bbl analyze categories`.")
+    else:
+        df["who"] = df.apply(lambda r: r["username"] if r["username"] else _fmt_addr(r["address"]), axis=1)
+        st.dataframe(
+            df[["who", "category", "estimated_pnl", "win_rate", "win_count", "loss_count",
+                "trade_count", "markets_traded", "buy_volume"]],
+            use_container_width=True, hide_index=True, height=480,
+            column_config={
+                "estimated_pnl": st.column_config.NumberColumn("Est PnL", format="$%+,.0f"),
+                "win_rate": st.column_config.NumberColumn("Win%", format="%.0%%"),
+                "buy_volume": st.column_config.NumberColumn("Buy Vol", format="$%,.0f"),
+            },
+        )
+
+        if sel_cat != "(all)" and len(df) > 1:
+            st.subheader(f"PnL distribution — {sel_cat}")
+            fig = px.histogram(df, x="estimated_pnl", nbins=30)
+            fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0))
+            st.plotly_chart(fig, use_container_width=True)
+
+
+# ----------------------------------------------------------- Fresh Wallets
+
+elif page == "Fresh Wallets":
+    st.title("Fresh wallet signals")
+    st.caption("New wallets that are immediately profitable — possible experienced traders rotating accounts.")
+
+    df = _q(
+        db_path,
+        """
+        SELECT fw.ts, fw.address, fw.wallet_age_days, fw.trade_count,
+               fw.total_pnl, fw.total_volume, fw.win_rate, fw.pnl_per_day,
+               fw.signal_strength, fw.note, t.username
+          FROM fresh_wallet_signals fw
+          LEFT JOIN traders t ON t.address = fw.address
+         ORDER BY fw.signal_strength DESC
+         LIMIT 100
+        """,
+    )
+    if df.empty:
+        st.info("No fresh wallet signals yet — run `bbl analyze fresh-wallets`.")
+    else:
+        df["who"] = df.apply(lambda r: r["username"] if r["username"] else _fmt_addr(r["address"]), axis=1)
+        df["time"] = df["ts"].apply(_human_ts)
+
+        st.metric("Fresh wallets detected", len(df))
+        st.dataframe(
+            df[["who", "signal_strength", "wallet_age_days", "total_pnl", "pnl_per_day",
+                "win_rate", "trade_count", "total_volume", "note"]],
+            use_container_width=True, hide_index=True, height=480,
+            column_config={
+                "signal_strength": st.column_config.NumberColumn("Signal", format="%.2f"),
+                "wallet_age_days": st.column_config.NumberColumn("Age (d)", format="%.1f"),
+                "total_pnl": st.column_config.NumberColumn("PnL", format="$%+,.0f"),
+                "pnl_per_day": st.column_config.NumberColumn("PnL/day", format="$%+,.0f"),
+                "win_rate": st.column_config.NumberColumn("Win%", format="%.0%%"),
+                "total_volume": st.column_config.NumberColumn("Volume", format="$%,.0f"),
+            },
+        )
+
+        if len(df) > 3:
+            st.subheader("Signal strength vs PnL")
+            fig = px.scatter(df, x="total_pnl", y="signal_strength", size="trade_count",
+                             hover_data=["who", "wallet_age_days"], log_x=True)
+            fig.update_layout(height=350, margin=dict(l=0, r=0, t=10, b=0))
+            st.plotly_chart(fig, use_container_width=True)
+
+
+# ------------------------------------------------------- Position Changes
+
+elif page == "Position Changes":
+    st.title("Position changes")
+    st.caption("Entries, exits, increases, decreases detected from position snapshots.")
+
+    c1, c2, c3 = st.columns(3)
+    change_type = c1.selectbox("Type", ["(all)", "entry", "exit", "increase", "decrease"])
+    limit = c2.number_input("Rows", 10, 500, 50, 10)
+
+    pc_where = ""
+    pc_params: list = []
+    if change_type != "(all)":
+        pc_where = "WHERE pc.change_type = ?"
+        pc_params.append(change_type)
+    pc_params.append(int(limit))
+
+    df = _q(
+        db_path,
+        f"""
+        SELECT pc.ts, pc.address, pc.change_type, pc.outcome,
+               pc.old_size, pc.new_size, pc.size_delta,
+               pc.old_value, pc.new_value,
+               m.question, t.username
+          FROM position_changes pc
+          LEFT JOIN markets m ON m.condition_id = pc.condition_id
+          LEFT JOIN traders t ON t.address = pc.address
+         {pc_where}
+         ORDER BY pc.ts DESC
+         LIMIT ?
+        """,
+        tuple(pc_params),
+    )
+    if df.empty:
+        st.info("No position changes yet — run `bbl enrich top` then `bbl analyze position-changes`.")
+    else:
+        df["time"] = df["ts"].apply(_human_ts)
+        df["who"] = df.apply(lambda r: r["username"] if r["username"] else _fmt_addr(r["address"]), axis=1)
+        df["question"] = df["question"].fillna("").str.slice(0, 60)
+
+        type_counts = df["change_type"].value_counts()
+        tc1, tc2, tc3, tc4 = st.columns(4)
+        tc1.metric("Entries", int(type_counts.get("entry", 0)))
+        tc2.metric("Exits", int(type_counts.get("exit", 0)))
+        tc3.metric("Increases", int(type_counts.get("increase", 0)))
+        tc4.metric("Decreases", int(type_counts.get("decrease", 0)))
+
+        st.dataframe(
+            df[["time", "who", "change_type", "outcome", "question",
+                "old_size", "new_size", "size_delta"]],
+            use_container_width=True, hide_index=True, height=480,
+            column_config={
+                "old_size": st.column_config.NumberColumn("Old", format="%,.0f"),
+                "new_size": st.column_config.NumberColumn("New", format="%,.0f"),
+                "size_delta": st.column_config.NumberColumn("Delta", format="%+,.0f"),
+            },
+        )
 
 
 # -------------------------------------------------------------- Smart Money
@@ -666,6 +833,35 @@ elif page == "Markets":
                 )
             else:
                 st.caption("No trades recorded for this market.")
+
+            st.subheader("Top traders in this market")
+            df_mt = _q(
+                db_path,
+                """
+                SELECT mt.address, mt.rank, mt.trade_count, mt.buy_volume,
+                       mt.sell_volume, mt.estimated_pnl, t.username
+                  FROM market_traders mt
+                  LEFT JOIN traders t ON t.address = mt.address
+                 WHERE mt.condition_id = ?
+                 ORDER BY mt.rank
+                 LIMIT 20
+                """,
+                (cid,),
+            )
+            if not df_mt.empty:
+                df_mt["who"] = df_mt.apply(
+                    lambda r: r["username"] if r["username"] else _fmt_addr(r["address"]), axis=1
+                )
+                st.dataframe(
+                    df_mt[["rank", "who", "trade_count", "buy_volume", "sell_volume", "estimated_pnl"]]
+                    .style.format({
+                        "buy_volume": "${:,.0f}", "sell_volume": "${:,.0f}",
+                        "estimated_pnl": "${:+,.0f}",
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.caption("No per-market trader data. Run `bbl analyze market-traders`.")
 
             st.subheader("Top holders")
             df_h = _q(

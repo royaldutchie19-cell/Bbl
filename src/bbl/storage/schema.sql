@@ -377,6 +377,29 @@ CREATE TABLE IF NOT EXISTS market_scores (
 );
 CREATE INDEX IF NOT EXISTS idx_market_scores ON market_scores(composite_score DESC);
 
+-- --------------------------------------------------- market traders
+
+-- Per-market trader rankings, recomputed by the analyzer.
+CREATE TABLE IF NOT EXISTS market_traders (
+    condition_id    TEXT NOT NULL,
+    address         TEXT NOT NULL,
+    category        TEXT,
+    buy_volume      REAL,
+    sell_volume     REAL,
+    net_volume      REAL,
+    trade_count     INTEGER,
+    avg_buy_price   REAL,
+    avg_sell_price  REAL,
+    first_trade_ts  INTEGER,
+    last_trade_ts   INTEGER,
+    estimated_pnl   REAL,
+    rank            INTEGER,
+    PRIMARY KEY (condition_id, address)
+);
+CREATE INDEX IF NOT EXISTS idx_mt_condition ON market_traders(condition_id);
+CREATE INDEX IF NOT EXISTS idx_mt_address   ON market_traders(address);
+CREATE INDEX IF NOT EXISTS idx_mt_category  ON market_traders(category);
+
 -- --------------------------------------------------------- arbitrage
 
 CREATE TABLE IF NOT EXISTS arbitrage_signals (
